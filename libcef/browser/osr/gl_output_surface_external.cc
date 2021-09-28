@@ -301,6 +301,11 @@ void GLOutputSurfaceExternal::OnSyncWaitComplete(
     std::vector<ui::LatencyInfo> latency_info) {
   gfx::GpuMemoryBufferHandle handle = current_surface_->GetHandle();
 
+  auto now = base::TimeTicks::Now();
+  client()->DidReceiveSwapBuffersAck({.swap_start = now});
+  client()->DidReceivePresentationFeedback(gfx::PresentationFeedback(
+      now, base::TimeDelta::FromMilliseconds(16), /*flags=*/0));
+
   //current_surface_->UnbindTexture();
   gpu::gles2::GLES2Interface* gl = context_provider_->ContextGL();
   gl->BindTexture(current_surface_->texture_target_,
@@ -343,10 +348,10 @@ void GLOutputSurfaceExternal::OnAfterSwap(
   latency_tracker()->OnGpuSwapBuffersCompleted(latency_info);
   // Swap timings are not available since for offscreen there is no Swap, just a
   // SignalSyncToken. We use base::TimeTicks::Now() as an overestimate.
-  auto now = base::TimeTicks::Now();
-  client()->DidReceiveSwapBuffersAck({.swap_start = now});
-  client()->DidReceivePresentationFeedback(gfx::PresentationFeedback(
-      now, base::TimeDelta::FromMilliseconds(16), /*flags=*/0));
+  //auto now = base::TimeTicks::Now();
+  //client()->DidReceiveSwapBuffersAck({.swap_start = now});
+  //client()->DidReceivePresentationFeedback(gfx::PresentationFeedback(
+  //    now, base::TimeDelta::FromMilliseconds(16), /*flags=*/0));
 
   if (needs_swap_size_notifications())
     client()->DidSwapWithSize(size_);
