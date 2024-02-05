@@ -61,7 +61,7 @@ void CefExternalRendererUpdaterOSR::OnAfterFlip(
 #if defined (OS_WIN) && !defined(ARCH_CPU_ARM_FAMILY)
   HANDLE nthandle = nullptr;
   if (new_texture)
-    nthandle = HANDLE(handle.dxgi_handle);
+    nthandle = handle.dxgi_handle.Get();
   view_->OnAcceleratedPaint2(damage_rect, nthandle, new_texture);
 #elif defined(OS_MAC)
   view_->OnAcceleratedPaint2(damage_rect,
