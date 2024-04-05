@@ -1,0 +1,1002 @@
+diff --git chrome/browser/vr/win/graphics_delegate_win.cc chrome/browser/vr/win/graphics_delegate_win.cc
+index 0916ebfce4db4..738fb8487d9ff 100644
+--- chrome/browser/vr/win/graphics_delegate_win.cc
++++ chrome/browser/vr/win/graphics_delegate_win.cc
+@@ -142,8 +142,8 @@ mojo::PlatformHandle GraphicsDelegateWin::GetTexture() {
+   if (!gpu_memory_buffer_)
+     return {};
+ 
+-  gfx::GpuMemoryBufferHandle gpu_handle = gpu_memory_buffer_->CloneHandle();
+-  return mojo::PlatformHandle(std::move(gpu_handle.dxgi_handle));
++  //gfx::GpuMemoryBufferHandle gpu_handle = gpu_memory_buffer_->CloneHandle();
++  return mojo::PlatformHandle(/*std::move(gpu_handle.dxgi_handle)*/);
+ }
+ 
+ const gpu::SyncToken& GraphicsDelegateWin::GetSyncToken() {
+diff --git components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
+index 9ce1f5a11b28c..abbd8ecce4e0a 100644
+--- components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
++++ components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
+@@ -22,6 +22,13 @@ ExternalBeginFrameSourceMojo::ExternalBeginFrameSourceMojo(
+ }
+ 
+ ExternalBeginFrameSourceMojo::~ExternalBeginFrameSourceMojo() {
++  if (pending_frame_callback_) {
++    BeginFrameAck nak(last_begin_frame_args_.frame_id.source_id,
++                      last_begin_frame_args_.frame_id.sequence_number,
++                      /*has_damage=*/false);
++    std::move(pending_frame_callback_).Run(nak);
++  }
++
+   frame_sink_manager_->RemoveObserver(this);
+   DCHECK(!display_);
+ }
+diff --git content/browser/compositor/viz_process_transport_factory.cc content/browser/compositor/viz_process_transport_factory.cc
+index 8a1e93995b316..d35121fead1c2 100644
+--- content/browser/compositor/viz_process_transport_factory.cc
++++ content/browser/compositor/viz_process_transport_factory.cc
+@@ -392,6 +392,8 @@ void VizProcessTransportFactory::OnEstablishedGpuChannel(
+       compositor_data.display_client->GetBoundRemote(resize_task_runner_);
+ 
+   if (compositor->use_external_begin_frame_control()) {
++    compositor_data.external_begin_frame_controller = {};
++
+     root_params->external_begin_frame_controller =
+         compositor_data.external_begin_frame_controller
+             .BindNewEndpointAndPassReceiver();
+diff --git device/vr/openxr/openxr_api_wrapper.cc device/vr/openxr/openxr_api_wrapper.cc
+index cd30680def1a3..5e176e4c1f2d5 100644
+--- device/vr/openxr/openxr_api_wrapper.cc
++++ device/vr/openxr/openxr_api_wrapper.cc
+@@ -688,7 +688,7 @@ void OpenXrApiWrapper::CreateSharedMailboxes() {
+     }
+ 
+     gfx::GpuMemoryBufferHandle gpu_memory_buffer_handle;
+-    gpu_memory_buffer_handle.dxgi_handle.Set(shared_handle);
++    //gpu_memory_buffer_handle.dxgi_handle.Set(shared_handle);
+     gpu_memory_buffer_handle.dxgi_token = gfx::DXGIHandleToken();
+     gpu_memory_buffer_handle.type = gfx::DXGI_SHARED_HANDLE;
+ 
+diff --git gpu/command_buffer/service/dxgi_shared_handle_manager.cc gpu/command_buffer/service/dxgi_shared_handle_manager.cc
+index 55c421bef9211..6bdd085a63532 100644
+--- gpu/command_buffer/service/dxgi_shared_handle_manager.cc
++++ gpu/command_buffer/service/dxgi_shared_handle_manager.cc
+@@ -16,7 +16,9 @@ namespace gpu {
+ 
+ namespace {
+ 
+-bool IsSameHandle(HANDLE handle, HANDLE other) {
++bool IsSameHandle(uint64_t handle, uint64_t other) {
++  return handle == other;
++#if 0
+   using PFN_COMPARE_OBJECT_HANDLES =
+       BOOL(WINAPI*)(HANDLE hFirstObjectHandle, HANDLE hSecondObjectHandle);
+   static PFN_COMPARE_OBJECT_HANDLES compare_object_handles_fn =
+@@ -39,6 +41,7 @@ bool IsSameHandle(HANDLE handle, HANDLE other) {
+   // case since there's no other way to check if the handles refer to the same
+   // D3D11 texture and IsSameHandle is only used as a sanity test.
+   return true;
++#endif
+ }
+ 
+ }  // namespace
+@@ -47,7 +50,7 @@ DXGISharedHandleState::DXGISharedHandleState(
+     base::PassKey<DXGISharedHandleManager>,
+     scoped_refptr<DXGISharedHandleManager> manager,
+     gfx::DXGIHandleToken token,
+-    base::win::ScopedHandle shared_handle,
++    uint64_t shared_handle,
+     Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture)
+     : base::subtle::RefCountedThreadSafeBase(kRefCountPreference),
+       manager_(std::move(manager)),
+@@ -158,9 +161,7 @@ DXGISharedHandleManager::~DXGISharedHandleManager() {
+ scoped_refptr<DXGISharedHandleState>
+ DXGISharedHandleManager::GetOrCreateSharedHandleState(
+     gfx::DXGIHandleToken token,
+-    base::win::ScopedHandle shared_handle) {
+-  DCHECK(shared_handle.IsValid());
+-
++    uint64_t shared_handle) {
+   base::AutoLock auto_lock(lock_);
+ 
+   auto it = shared_handle_state_map_.find(token);
+@@ -169,7 +170,7 @@ DXGISharedHandleManager::GetOrCreateSharedHandleState(
+     DCHECK(state);
+     // If there's already a shared handle associated with the token, it should
+     // refer to the same D3D11 texture (or kernel object).
+-    if (!IsSameHandle(shared_handle.Get(), state->GetSharedHandle())) {
++    if (!IsSameHandle(shared_handle, state->GetSharedHandle())) {
+       DLOG(ERROR) << "Existing shared handle for token doesn't match";
+       return nullptr;
+     }
+@@ -185,8 +186,8 @@ DXGISharedHandleManager::GetOrCreateSharedHandleState(
+   }
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+-  hr = d3d11_device1->OpenSharedResource1(shared_handle.Get(),
+-                                          IID_PPV_ARGS(&d3d11_texture));
++  hr = d3d11_device_->OpenSharedResource(HANDLE(shared_handle),
++                                         IID_PPV_ARGS(&d3d11_texture));
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Unable to open shared resource from DXGI handle. Error: "
+                 << logging::SystemErrorCodeToString(hr);
+@@ -205,9 +206,9 @@ DXGISharedHandleManager::GetOrCreateSharedHandleState(
+ 
+ scoped_refptr<DXGISharedHandleState>
+ DXGISharedHandleManager::CreateAnonymousSharedHandleState(
+-    base::win::ScopedHandle shared_handle,
++    uint64_t shared_handle,
+     Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture) {
+-  DCHECK(shared_handle.IsValid());
++  //DCHECK(shared_handle.IsValid());
+   DCHECK(d3d11_texture);
+ 
+   base::AutoLock auto_lock(lock_);
+diff --git gpu/command_buffer/service/dxgi_shared_handle_manager.h gpu/command_buffer/service/dxgi_shared_handle_manager.h
+index 845f9a0777ade..09789fe16504c 100644
+--- gpu/command_buffer/service/dxgi_shared_handle_manager.h
++++ gpu/command_buffer/service/dxgi_shared_handle_manager.h
+@@ -49,7 +49,7 @@ class GPU_GLES2_EXPORT DXGISharedHandleState
+   DXGISharedHandleState(base::PassKey<DXGISharedHandleManager>,
+                         scoped_refptr<DXGISharedHandleManager> manager,
+                         gfx::DXGIHandleToken token,
+-                        base::win::ScopedHandle shared_handle,
++                        uint64_t shared_handle,
+                         Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture);
+ 
+   DXGISharedHandleState(const DXGISharedHandleState&) = delete;
+@@ -58,7 +58,7 @@ class GPU_GLES2_EXPORT DXGISharedHandleState
+   void AddRef() const;
+   void Release() const;
+ 
+-  HANDLE GetSharedHandle() const { return shared_handle_.Get(); }
++  uint64_t GetSharedHandle() const { return shared_handle_; }
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture() const {
+     return d3d11_texture_;
+@@ -84,7 +84,7 @@ class GPU_GLES2_EXPORT DXGISharedHandleState
+   // keyed mutex. To create the corresponding D3D12 interface, pass the handle
+   // stored in |shared_handle_| to ID3D12Device::OpenSharedHandle. Only one
+   // component is allowed to read/write to the texture at a time.
+-  base::win::ScopedHandle shared_handle_;
++  uint64_t shared_handle_;
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture_;
+   Microsoft::WRL::ComPtr<IDXGIKeyedMutex> dxgi_keyed_mutex_;
+   bool acquired_for_d3d12_ = false;
+@@ -103,14 +103,14 @@ class GPU_GLES2_EXPORT DXGISharedHandleManager
+   // will refer to the same D3D11 texture. Returns a nullptr on error.
+   scoped_refptr<DXGISharedHandleState> GetOrCreateSharedHandleState(
+       gfx::DXGIHandleToken token,
+-      base::win::ScopedHandle shared_handle);
++      uint64_t shared_handle);
+ 
+   // Creates a new unique state for given |shared_handle| and |d3d11_texture|.
+   // No other state will have references to the same shared handle and texture.
+   // Useful when creating handles which are guaranteed to never be duplicated
+   // e.g. WebGPU usage shared image that only needs a handle for Dawn interop.
+   scoped_refptr<DXGISharedHandleState> CreateAnonymousSharedHandleState(
+-      base::win::ScopedHandle shared_handle,
++      uint64_t shared_handle,
+       Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture);
+ 
+   size_t GetSharedHandleMapSizeForTesting() const;
+diff --git gpu/command_buffer/service/dxgi_shared_handle_manager_unittest.cc gpu/command_buffer/service/dxgi_shared_handle_manager_unittest.cc
+index a0341b3426761..1cc5bb9114a1a 100644
+--- gpu/command_buffer/service/dxgi_shared_handle_manager_unittest.cc
++++ gpu/command_buffer/service/dxgi_shared_handle_manager_unittest.cc
+@@ -47,7 +47,7 @@ class DXGISharedHandleManagerTest : public testing::Test {
+     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+     desc.CPUAccessFlags = 0;
+     desc.MiscFlags =
+-        D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
++        D3D11_RESOURCE_MISC_SHARED;
+ 
+     Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+     HRESULT hr = d3d11_device_->CreateTexture2D(&desc, nullptr, &d3d11_texture);
+diff --git gpu/command_buffer/service/shared_image_backing_d3d.cc gpu/command_buffer/service/shared_image_backing_d3d.cc
+index 0b2477bfc7b89..76423f9bce0d4 100644
+--- gpu/command_buffer/service/shared_image_backing_d3d.cc
++++ gpu/command_buffer/service/shared_image_backing_d3d.cc
+@@ -645,13 +645,14 @@ SharedImageBackingD3D::ProduceDawn(SharedImageManager* manager,
+   // Persistently open the shared handle by caching it on this backing.
+   if (!external_image_) {
+     DCHECK(dxgi_shared_handle_state_);
+-    const HANDLE shared_handle = dxgi_shared_handle_state_->GetSharedHandle();
+-    DCHECK(base::win::HandleTraits::IsHandleValid(shared_handle));
++    const uint64_t shared_handle = dxgi_shared_handle_state_->GetSharedHandle();
++    CHECK(false);
++    //DCHECK(base::win::HandleTraits::IsHandleValid(shared_handle));
+ 
+     dawn::native::d3d12::ExternalImageDescriptorDXGISharedHandle
+         externalImageDesc;
+     externalImageDesc.cTextureDescriptor = &texture_descriptor;
+-    externalImageDesc.sharedHandle = shared_handle;
++    externalImageDesc.sharedHandle = (HANDLE)shared_handle;
+ 
+     external_image_ = dawn::native::d3d12::ExternalImageDXGI::Create(
+         device, &externalImageDesc);
+diff --git gpu/command_buffer/service/shared_image_backing_factory_d3d.cc gpu/command_buffer/service/shared_image_backing_factory_d3d.cc
+index b2a5bb00ca9a4..acf380a32b321 100644
+--- gpu/command_buffer/service/shared_image_backing_factory_d3d.cc
++++ gpu/command_buffer/service/shared_image_backing_factory_d3d.cc
+@@ -107,7 +107,7 @@ scoped_refptr<DXGISharedHandleState> ValidateAndOpenSharedHandle(
+     gfx::GpuMemoryBufferHandle handle,
+     gfx::BufferFormat format,
+     const gfx::Size& size) {
+-  if (handle.type != gfx::DXGI_SHARED_HANDLE || !handle.dxgi_handle.IsValid()) {
++  if (handle.type != gfx::DXGI_SHARED_HANDLE) {
+     DLOG(ERROR) << "Invalid handle with type: " << handle.type;
+     return nullptr;
+   }
+@@ -350,8 +350,7 @@ SharedImageBackingFactoryD3D::CreateSharedImage(
+     desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+   }
+   desc.CPUAccessFlags = 0;
+-  desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-                   D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++  desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+   HRESULT hr = d3d11_device_->CreateTexture2D(&desc, nullptr, &d3d11_texture);
+   if (FAILED(hr)) {
+@@ -364,7 +363,7 @@ SharedImageBackingFactoryD3D::CreateSharedImage(
+   d3d11_device_->SetPrivateData(WKPDID_D3DDebugObjectName, debug_label.length(),
+                                 debug_label.c_str());
+ 
+-  Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
++  Microsoft::WRL::ComPtr<IDXGIResource> dxgi_resource;
+   hr = d3d11_texture.As(&dxgi_resource);
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "QueryInterface for IDXGIResource failed with error "
+@@ -373,8 +372,8 @@ SharedImageBackingFactoryD3D::CreateSharedImage(
+   }
+ 
+   HANDLE shared_handle;
+-  hr = dxgi_resource->CreateSharedHandle(
+-      nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
++  hr = dxgi_resource->GetSharedHandle(
++      //nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
+       &shared_handle);
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Unable to create shared handle for DXGIResource "
+@@ -384,7 +383,7 @@ SharedImageBackingFactoryD3D::CreateSharedImage(
+ 
+   scoped_refptr<DXGISharedHandleState> dxgi_shared_handle_state =
+       dxgi_shared_handle_manager_->CreateAnonymousSharedHandleState(
+-          base::win::ScopedHandle(shared_handle), d3d11_texture);
++          uint64_t(shared_handle), d3d11_texture);
+ 
+   return SharedImageBackingD3D::CreateFromDXGISharedHandle(
+       mailbox, format, size, color_space, surface_origin, alpha_type, usage,
+diff --git gpu/command_buffer/service/shared_image_backing_factory_d3d_unittest.cc gpu/command_buffer/service/shared_image_backing_factory_d3d_unittest.cc
+index 8b5d4d52093f1..54efe92a32290 100644
+--- gpu/command_buffer/service/shared_image_backing_factory_d3d_unittest.cc
++++ gpu/command_buffer/service/shared_image_backing_factory_d3d_unittest.cc
+@@ -965,7 +965,7 @@ void SharedImageBackingFactoryD3DTest::RunCreateSharedImageFromHandleTest(
+   desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+   desc.CPUAccessFlags = 0;
+   desc.MiscFlags =
+-      D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
++      D3D11_RESOURCE_MISC_SHARED;
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+   HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &d3d11_texture);
+   ASSERT_EQ(hr, S_OK);
+@@ -1310,8 +1310,7 @@ SharedImageBackingFactoryD3DTest::CreateVideoImages(const gfx::Size& size,
+   CD3D11_TEXTURE2D_DESC desc(DXGI_FORMAT_NV12, size.width(), size.height(), 1,
+                              1, D3D11_BIND_SHADER_RESOURCE);
+   if (use_shared_handle) {
+-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-                     D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+   }
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+diff --git gpu/config/gpu_info_collector.cc gpu/config/gpu_info_collector.cc
+index b0c51a19fd5ba..5ee07d17cca84 100644
+--- gpu/config/gpu_info_collector.cc
++++ gpu/config/gpu_info_collector.cc
+@@ -578,8 +578,8 @@ bool CollectGpuExtraInfo(gfx::GpuExtraInfo* gpu_extra_info,
+           QueryEGLStringi(display, EGL_FEATURE_BUG_ANGLE, i);
+       gpu_extra_info->angle_features[i].status =
+           QueryEGLStringi(display, EGL_FEATURE_STATUS_ANGLE, i);
+-      gpu_extra_info->angle_features[i].condition =
+-          QueryEGLStringi(display, EGL_FEATURE_CONDITION_ANGLE, i);
++      //gpu_extra_info->angle_features[i].condition =
++          //QueryEGLStringi(display, EGL_FEATURE_CONDITION_ANGLE, i);
+     }
+   }
+ 
+diff --git gpu/ipc/common/dxgi_helpers.cc gpu/ipc/common/dxgi_helpers.cc
+index e142cb1d2f003..dae2c9fde3bb9 100644
+--- gpu/ipc/common/dxgi_helpers.cc
++++ gpu/ipc/common/dxgi_helpers.cc
+@@ -67,7 +67,7 @@ DXGIScopedReleaseKeyedMutex::~DXGIScopedReleaseKeyedMutex() {
+ }
+ 
+ bool CopyDXGIBufferToShMem(
+-    HANDLE dxgi_handle,
++    uint64_t dxgi_handle,
+     base::span<uint8_t> shared_memory,
+     ID3D11Device* d3d11_device,
+     Microsoft::WRL::ComPtr<ID3D11Texture2D>* staging_texture) {
+@@ -84,7 +84,7 @@ bool CopyDXGIBufferToShMem(
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+ 
+   // Open texture on device using shared handle
+-  hr = device1->OpenSharedResource1(dxgi_handle, IID_PPV_ARGS(&texture));
++  hr = d3d11_device->OpenSharedResource(HANDLE(dxgi_handle), IID_PPV_ARGS(&texture));
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Failed to open shared texture. hr=" << std::hex << hr;
+     return false;
+diff --git gpu/ipc/common/dxgi_helpers.h gpu/ipc/common/dxgi_helpers.h
+index 4adb9293957b3..f5e44e6895ae3 100644
+--- gpu/ipc/common/dxgi_helpers.h
++++ gpu/ipc/common/dxgi_helpers.h
+@@ -60,7 +60,7 @@ class GPU_EXPORT DXGIScopedReleaseKeyedMutex {
+ // a staging texture. The texture may be recreated if it has wrong size or
+ // format. Returns true if succeeded.
+ GPU_EXPORT bool CopyDXGIBufferToShMem(
+-    HANDLE dxgi_handle,
++    uint64_t dxgi_handle,
+     base::span<uint8_t> shared_memory,
+     ID3D11Device* d3d11_device,
+     Microsoft::WRL::ComPtr<ID3D11Texture2D>* staging_texture);
+diff --git gpu/ipc/common/gpu_memory_buffer_impl_dxgi.cc gpu/ipc/common/gpu_memory_buffer_impl_dxgi.cc
+index eb88dfdbba48e..82f816903bf74 100644
+--- gpu/ipc/common/gpu_memory_buffer_impl_dxgi.cc
++++ gpu/ipc/common/gpu_memory_buffer_impl_dxgi.cc
+@@ -32,7 +32,7 @@ GpuMemoryBufferImplDXGI::CreateFromHandle(
+     GpuMemoryBufferManager* gpu_memory_buffer_manager,
+     scoped_refptr<base::UnsafeSharedMemoryPool> pool,
+     base::span<uint8_t> premapped_memory) {
+-  DCHECK(handle.dxgi_handle.IsValid());
++  //DCHECK(handle.dxgi_handle.IsValid());
+   DCHECK(handle.dxgi_token.has_value());
+   return base::WrapUnique(new GpuMemoryBufferImplDXGI(
+       handle.id, size, format, std::move(callback),
+@@ -67,26 +67,25 @@ base::OnceClosure GpuMemoryBufferImplDXGI::AllocateForTesting(
+       D3D11_USAGE_DEFAULT,
+       D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+       0,
+-      D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-          D3D11_RESOURCE_MISC_SHARED};
++      D3D11_RESOURCE_MISC_SHARED};
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+ 
+   HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &d3d11_texture);
+   DCHECK(SUCCEEDED(hr));
+ 
+-  Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
++  Microsoft::WRL::ComPtr<IDXGIResource> dxgi_resource;
+   hr = d3d11_texture.As(&dxgi_resource);
+   DCHECK(SUCCEEDED(hr));
+ 
+   HANDLE texture_handle;
+-  hr = dxgi_resource->CreateSharedHandle(
+-      nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
++  hr = dxgi_resource->GetSharedHandle(
++      //nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
+       &texture_handle);
+   DCHECK(SUCCEEDED(hr));
+ 
+   gfx::GpuMemoryBufferId kBufferId(1);
+-  handle->dxgi_handle.Set(texture_handle);
++  handle->dxgi_handle = uint64_t(texture_handle);
+   handle->type = gfx::DXGI_SHARED_HANDLE;
+   handle->id = kBufferId;
+   return base::DoNothing();
+@@ -167,21 +166,23 @@ gfx::GpuMemoryBufferHandle GpuMemoryBufferImplDXGI::CloneHandle() const {
+   handle.id = id_;
+   handle.offset = 0;
+   handle.stride = stride(0);
+-  base::ProcessHandle process = ::GetCurrentProcess();
++  //base::ProcessHandle process = ::GetCurrentProcess();
++  /*
+   HANDLE duplicated_handle;
+   BOOL result =
+       ::DuplicateHandle(process, dxgi_handle_.Get(), process,
+                         &duplicated_handle, 0, FALSE, DUPLICATE_SAME_ACCESS);
+   if (!result)
+     DPLOG(ERROR) << "Failed to duplicate DXGI resource handle.";
+-  handle.dxgi_handle.Set(duplicated_handle);
++  */
++  handle.dxgi_handle = dxgi_handle_;
+   handle.dxgi_token = dxgi_token_;
+ 
+   return handle;
+ }
+ 
+ HANDLE GpuMemoryBufferImplDXGI::GetHandle() const {
+-  return dxgi_handle_.Get();
++  return (HANDLE)dxgi_handle_;
+ }
+ 
+ GpuMemoryBufferImplDXGI::GpuMemoryBufferImplDXGI(
+@@ -189,7 +190,7 @@ GpuMemoryBufferImplDXGI::GpuMemoryBufferImplDXGI(
+     const gfx::Size& size,
+     gfx::BufferFormat format,
+     DestructionCallback callback,
+-    base::win::ScopedHandle dxgi_handle,
++    uint64_t dxgi_handle,
+     gfx::DXGIHandleToken dxgi_token,
+     gpu::GpuMemoryBufferManager* gpu_memory_buffer_manager,
+     scoped_refptr<base::UnsafeSharedMemoryPool> pool,
+diff --git gpu/ipc/common/gpu_memory_buffer_impl_dxgi.h gpu/ipc/common/gpu_memory_buffer_impl_dxgi.h
+index 32159783a2b96..0dcea6cc28e71 100644
+--- gpu/ipc/common/gpu_memory_buffer_impl_dxgi.h
++++ gpu/ipc/common/gpu_memory_buffer_impl_dxgi.h
+@@ -64,13 +64,13 @@ class GPU_EXPORT GpuMemoryBufferImplDXGI : public GpuMemoryBufferImpl {
+                           const gfx::Size& size,
+                           gfx::BufferFormat format,
+                           DestructionCallback callback,
+-                          base::win::ScopedHandle dxgi_handle,
++                          uint64_t dxgi_handle,
+                           gfx::DXGIHandleToken dxgi_token,
+                           GpuMemoryBufferManager* gpu_memory_buffer_manager,
+                           scoped_refptr<base::UnsafeSharedMemoryPool> pool,
+                           base::span<uint8_t> premapped_memory);
+ 
+-  base::win::ScopedHandle dxgi_handle_;
++  uint64_t dxgi_handle_;
+   gfx::DXGIHandleToken dxgi_token_;
+   raw_ptr<GpuMemoryBufferManager> gpu_memory_buffer_manager_;
+ 
+diff --git gpu/ipc/service/gpu_memory_buffer_factory_dxgi.cc gpu/ipc/service/gpu_memory_buffer_factory_dxgi.cc
+index 4d47b62a4f2c0..cab06681192d5 100644
+--- gpu/ipc/service/gpu_memory_buffer_factory_dxgi.cc
++++ gpu/ipc/service/gpu_memory_buffer_factory_dxgi.cc
+@@ -27,6 +27,8 @@ GpuMemoryBufferFactoryDXGI::~GpuMemoryBufferFactoryDXGI() = default;
+ Microsoft::WRL::ComPtr<ID3D11Device>
+ GpuMemoryBufferFactoryDXGI::GetOrCreateD3D11Device() {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  return gl::QueryD3D11DeviceObjectFromANGLE();
++#if 0
+   if (!d3d11_device_) {
+     // Use same adapter as ANGLE device.
+     auto angle_d3d11_device = gl::QueryD3D11DeviceObjectFromANGLE();
+@@ -80,6 +82,7 @@ GpuMemoryBufferFactoryDXGI::GetOrCreateD3D11Device() {
+   }
+   DCHECK(d3d11_device_);
+   return d3d11_device_;
++#endif
+ }
+ 
+ gfx::GpuMemoryBufferHandle GpuMemoryBufferFactoryDXGI::CreateGpuMemoryBuffer(
+@@ -129,25 +132,24 @@ gfx::GpuMemoryBufferHandle GpuMemoryBufferFactoryDXGI::CreateGpuMemoryBuffer(
+       D3D11_USAGE_DEFAULT,
+       D3D11_BIND_SHADER_RESOURCE,
+       0,
+-      D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-          D3D11_RESOURCE_MISC_SHARED};
++      D3D11_RESOURCE_MISC_SHARED};
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+ 
+   if (FAILED(d3d11_device->CreateTexture2D(&desc, nullptr, &d3d11_texture)))
+     return handle;
+ 
+-  Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
++  Microsoft::WRL::ComPtr<IDXGIResource> dxgi_resource;
+   if (FAILED(d3d11_texture.As(&dxgi_resource)))
+     return handle;
+ 
+   HANDLE texture_handle;
+-  if (FAILED(dxgi_resource->CreateSharedHandle(
+-          nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+-          nullptr, &texture_handle)))
++  if (FAILED(dxgi_resource->GetSharedHandle(
++          //nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
++          /*nullptr, */&texture_handle)))
+     return handle;
+ 
+-  handle.dxgi_handle.Set(texture_handle);
++  handle.dxgi_handle = uint64_t(texture_handle);
+   handle.dxgi_token = gfx::DXGIHandleToken();
+   handle.type = gfx::DXGI_SHARED_HANDLE;
+   handle.id = id;
+@@ -172,7 +174,7 @@ bool GpuMemoryBufferFactoryDXGI::FillSharedMemoryRegionWithBufferContents(
+   if (!mapping.IsValid())
+     return false;
+ 
+-  return CopyDXGIBufferToShMem(buffer_handle.dxgi_handle.Get(),
++  return CopyDXGIBufferToShMem(buffer_handle.dxgi_handle,
+                                mapping.GetMemoryAsSpan<uint8_t>(),
+                                d3d11_device.Get(), &staging_texture_);
+ }
+diff --git media/capture/video/win/gpu_memory_buffer_tracker.cc media/capture/video/win/gpu_memory_buffer_tracker.cc
+index 4e92d302235e5..7fdfe69fbd390 100644
+--- media/capture/video/win/gpu_memory_buffer_tracker.cc
++++ media/capture/video/win/gpu_memory_buffer_tracker.cc
+@@ -21,7 +21,7 @@ namespace media {
+ 
+ namespace {
+ 
+-base::win::ScopedHandle CreateNV12Texture(ID3D11Device* d3d11_device,
++uint64_t CreateNV12Texture(ID3D11Device* d3d11_device,
+                                           const gfx::Size& size) {
+   const DXGI_FORMAT dxgi_format = DXGI_FORMAT_NV12;
+   D3D11_TEXTURE2D_DESC desc = {
+@@ -34,8 +34,7 @@ base::win::ScopedHandle CreateNV12Texture(ID3D11Device* d3d11_device,
+       .Usage = D3D11_USAGE_DEFAULT,
+       .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
+       .CPUAccessFlags = 0,
+-      .MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-                   D3D11_RESOURCE_MISC_SHARED};
++      .MiscFlags = D3D11_RESOURCE_MISC_SHARED};
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
+ 
+@@ -43,29 +42,29 @@ base::win::ScopedHandle CreateNV12Texture(ID3D11Device* d3d11_device,
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Failed to create D3D11 texture: "
+                 << logging::SystemErrorCodeToString(hr);
+-    return base::win::ScopedHandle();
++    return uint64_t(0);
+   }
+   hr = SetDebugName(d3d11_texture.Get(), "Camera_MemoryBufferTracker");
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Failed to label D3D11 texture: "
+                 << logging::SystemErrorCodeToString(hr);
+-    return base::win::ScopedHandle();
++    return uint64_t(0);
+   }
+ 
+-  Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
++  Microsoft::WRL::ComPtr<IDXGIResource> dxgi_resource;
+   hr = d3d11_texture.As(&dxgi_resource);
+   CHECK(SUCCEEDED(hr));
+ 
+   HANDLE texture_handle;
+-  hr = dxgi_resource->CreateSharedHandle(
+-      nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
++  hr = dxgi_resource->GetSharedHandle(
++      //nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
+       &texture_handle);
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Failed to create shared D3D11 texture handle: "
+                 << logging::SystemErrorCodeToString(hr);
+-    return base::win::ScopedHandle();
++    return uint64_t(0);
+   }
+-  return base::win::ScopedHandle(texture_handle);
++  return uint64_t(texture_handle);
+ }
+ 
+ }  // namespace
+@@ -97,10 +96,10 @@ bool GpuMemoryBufferTracker::CreateBufferInternal() {
+       CreateNV12Texture(d3d_device_.Get(), buffer_size_);
+   buffer_handle.dxgi_token = gfx::DXGIHandleToken();
+ 
+-  if (!buffer_handle.dxgi_handle.IsValid()) {
++  /*if (!buffer_handle.dxgi_handle.IsValid()) {
+     LOG(ERROR) << "Failed to create NV12 texture";
+     return false;
+-  }
++  }*/
+ 
+   buffer_ = gpu::GpuMemoryBufferImplDXGI::CreateFromHandle(
+       std::move(buffer_handle), buffer_size_,
+@@ -154,7 +153,7 @@ GpuMemoryBufferTracker::DuplicateAsUnsafeRegion() {
+   CHECK(region_.IsValid());
+   CHECK(mapping_.IsValid());
+ 
+-  if (!gpu::CopyDXGIBufferToShMem(buffer_->GetHandle(),
++  if (!gpu::CopyDXGIBufferToShMem(uint64_t(buffer_->GetHandle()),
+                                   mapping_.GetMemoryAsSpan<uint8_t>(),
+                                   d3d_device_.Get(), &staging_texture_)) {
+     DLOG(ERROR) << "Couldn't copy DXGI buffer to shmem";
+diff --git media/capture/video/win/video_capture_device_mf_win.cc media/capture/video/win/video_capture_device_mf_win.cc
+index 3fbcc3bdb63ff..2a5b35d0d925c 100644
+--- media/capture/video/win/video_capture_device_mf_win.cc
++++ media/capture/video/win/video_capture_device_mf_win.cc
+@@ -566,7 +566,7 @@ void GetTextureSizeAndFormat(ID3D11Texture2D* texture,
+ }
+ 
+ HRESULT CopyTextureToGpuMemoryBuffer(ID3D11Texture2D* texture,
+-                                     HANDLE dxgi_handle) {
++                                     uint64_t dxgi_handle) {
+   Microsoft::WRL::ComPtr<ID3D11Device> texture_device;
+   texture->GetDevice(&texture_device);
+ 
+@@ -580,7 +580,7 @@ HRESULT CopyTextureToGpuMemoryBuffer(ID3D11Texture2D* texture,
+ 
+   // Open shared resource from GpuMemoryBuffer on source texture D3D11 device
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> target_texture;
+-  hr = device1->OpenSharedResource1(dxgi_handle, IID_PPV_ARGS(&target_texture));
++  hr = texture_device->OpenSharedResource(HANDLE(dxgi_handle), IID_PPV_ARGS(&target_texture));
+   if (FAILED(hr)) {
+     DLOG(ERROR) << "Failed to open shared camera target texture: "
+                 << logging::SystemErrorCodeToString(hr);
+@@ -1600,12 +1600,12 @@ HRESULT VideoCaptureDeviceMFWin::DeliverTextureToClient(
+   }
+ 
+   auto gmb_handle = capture_buffer.handle_provider->GetGpuMemoryBufferHandle();
+-  if (!gmb_handle.dxgi_handle.IsValid()) {
++/*  if (!gmb_handle.dxgi_handle.IsValid()) {
+     // If the device is removed and GMB tracker fails to recreate it,
+     // an empty gmb handle may be returned here.
+     return MF_E_UNEXPECTED;
+-  }
+-  hr = CopyTextureToGpuMemoryBuffer(texture, gmb_handle.dxgi_handle.Get());
++  }*/
++  hr = CopyTextureToGpuMemoryBuffer(texture, gmb_handle.dxgi_handle);
+ 
+   if (FAILED(hr)) {
+     LOG(ERROR) << "Failed to copy camera device texture to output texture: "
+diff --git media/gpu/windows/d3d11_decoder_configurator.cc media/gpu/windows/d3d11_decoder_configurator.cc
+index 5967559120ef9..b5e1c6eda0996 100644
+--- media/gpu/windows/d3d11_decoder_configurator.cc
++++ media/gpu/windows/d3d11_decoder_configurator.cc
+@@ -113,8 +113,7 @@ D3D11DecoderConfigurator::CreateOutputTexture(ComD3D11Device device,
+     // shouldn't be encrypted.
+     DCHECK(!supports_swap_chain_);
+     DCHECK(!is_encrypted_);
+-    output_texture_desc_.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-                                     D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++    output_texture_desc_.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+   } else if (supports_swap_chain_) {
+     // Decode swap chains do not support shared resources.
+     // TODO(sunnyps): Find a workaround for when the decoder moves to its own
+diff --git media/gpu/windows/d3d11_texture_selector.cc media/gpu/windows/d3d11_texture_selector.cc
+index ac5600448769e..c68a7a16fa9ff 100644
+--- media/gpu/windows/d3d11_texture_selector.cc
++++ media/gpu/windows/d3d11_texture_selector.cc
+@@ -201,8 +201,7 @@ std::unique_ptr<Texture2DWrapper> CopyTextureSelector::CreateTextureWrapper(
+   texture_desc.Width = size.width();
+   texture_desc.Height = size.height();
+   if (DoesSharedImageUseSharedHandle()) {
+-    texture_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-                             D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++    texture_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+   }
+ 
+   ComD3D11Texture2D out_texture;
+diff --git media/gpu/windows/d3d11_texture_wrapper.cc media/gpu/windows/d3d11_texture_wrapper.cc
+index 59c3e39edafee..dde107c9649ef 100644
+--- media/gpu/windows/d3d11_texture_wrapper.cc
++++ media/gpu/windows/d3d11_texture_wrapper.cc
+@@ -214,7 +214,7 @@ DefaultTexture2DWrapper::GpuResources::GpuResources(
+     texture->GetDesc(&desc);
+     // Create shared handle for shareable output texture.
+     if (desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) {
+-      Microsoft::WRL::ComPtr<IDXGIResource1> dxgi_resource;
++      Microsoft::WRL::ComPtr<IDXGIResource> dxgi_resource;
+       HRESULT hr = texture.As(&dxgi_resource);
+       if (FAILED(hr)) {
+         DLOG(ERROR) << "QueryInterface for IDXGIResource failed with error "
+@@ -224,10 +224,10 @@ DefaultTexture2DWrapper::GpuResources::GpuResources(
+         return;
+       }
+ 
+-      HANDLE shared_handle = nullptr;
+-      hr = dxgi_resource->CreateSharedHandle(
+-          nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+-          nullptr, &shared_handle);
++      HANDLE shared_handle = 0;
++      hr = dxgi_resource->GetSharedHandle(
++          //nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
++          /*nullptr, */&shared_handle);
+       if (FAILED(hr)) {
+         DLOG(ERROR) << "CreateSharedHandle failed with error " << std::hex
+                     << hr;
+@@ -239,7 +239,7 @@ DefaultTexture2DWrapper::GpuResources::GpuResources(
+       dxgi_shared_handle_state =
+           helper_->GetDXGISharedHandleManager()
+               ->CreateAnonymousSharedHandleState(
+-                  base::win::ScopedHandle(shared_handle), texture);
++                  uint64_t(shared_handle), texture);
+     }
+   }
+ 
+diff --git media/gpu/windows/media_foundation_video_encode_accelerator_win.cc media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
+index f7b7aaf10ab58..36c70ddfe12b3 100644
+--- media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
++++ media/gpu/windows/media_foundation_video_encode_accelerator_win.cc
+@@ -1136,8 +1136,8 @@ HRESULT MediaFoundationVideoEncodeAccelerator::PopulateInputSampleBufferGpu(
+   RETURN_ON_HR_FAILURE(hr, "Failed to query ID3D11Device1", hr);
+ 
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> input_texture;
+-  hr = device1->OpenSharedResource1(buffer_handle.dxgi_handle.Get(),
+-                                    IID_PPV_ARGS(&input_texture));
++  hr = d3d_device->OpenSharedResource(HANDLE(buffer_handle.dxgi_handle),
++                                   IID_PPV_ARGS(&input_texture));
+   RETURN_ON_HR_FAILURE(hr, "Failed to open shared GMB D3D texture", hr);
+ 
+   // Check if we need to scale the input texture
+diff --git media/renderers/win/media_foundation_texture_pool.cc media/renderers/win/media_foundation_texture_pool.cc
+index 0c3ad4dda7aa0..50c7e17dc0fbb 100644
+--- media/renderers/win/media_foundation_texture_pool.cc
++++ media/renderers/win/media_foundation_texture_pool.cc
+@@ -56,8 +56,7 @@ HRESULT MediaFoundationTexturePool::Initialize(
+       D3D11_USAGE_DEFAULT,
+       D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+       0,
+-      D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-          D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX};
++      D3D11_RESOURCE_MISC_SHARED};
+ 
+   std::vector<MediaFoundationFrameInfo> frame_infos;
+   bool callback_is_valid = !frame_pool_cb.is_null();
+@@ -78,23 +77,20 @@ HRESULT MediaFoundationTexturePool::Initialize(
+         device->CreateTexture2D(&desc, nullptr, &d3d11_video_frame));
+     SetDebugName(d3d11_video_frame.Get(), "Media_MFFrameServerMode_Pool");
+ 
+-    ComPtr<IDXGIResource1> d3d11_video_frame_resource;
++    ComPtr<IDXGIResource> d3d11_video_frame_resource;
+     RETURN_IF_FAILED(d3d11_video_frame.As(&d3d11_video_frame_resource));
+ 
+     HANDLE shared_texture_handle;
+-    RETURN_IF_FAILED(d3d11_video_frame_resource->CreateSharedHandle(
+-        nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+-        nullptr, &shared_texture_handle));
++    RETURN_IF_FAILED(d3d11_video_frame_resource->GetSharedHandle(
++        //nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
++        /*nullptr, */&shared_texture_handle));
+ 
+-    base::win::ScopedHandle scoped_shared_texture_handle;
+-    scoped_shared_texture_handle.Set(shared_texture_handle);
+-    shared_texture_handle = nullptr;
+     texture_pool_[texture_token].texture_ = std::move(d3d11_video_frame);
+     texture_pool_[texture_token].texture_in_use_ = false;
+ 
+     if (callback_is_valid) {
+       MediaFoundationFrameInfo frame_info;
+-      frame_info.dxgi_handle = std::move(scoped_shared_texture_handle);
++      frame_info.dxgi_handle = uint64_t(shared_texture_handle);
+       frame_info.token = texture_token;
+       frame_infos.emplace_back(std::move(frame_info));
+     }
+diff --git media/renderers/win/media_foundation_texture_pool.h media/renderers/win/media_foundation_texture_pool.h
+index fe0105554af6e..ff505efe97f9e 100644
+--- media/renderers/win/media_foundation_texture_pool.h
++++ media/renderers/win/media_foundation_texture_pool.h
+@@ -22,7 +22,7 @@ struct MEDIA_EXPORT MediaFoundationFrameInfo {
+   MediaFoundationFrameInfo();
+   ~MediaFoundationFrameInfo();
+   MediaFoundationFrameInfo(MediaFoundationFrameInfo&& other);
+-  base::win::ScopedHandle dxgi_handle;
++  uint64_t dxgi_handle;
+   base::UnguessableToken token;
+ };
+ 
+diff --git third_party/blink/renderer/platform/graphics/gpu/xr_frame_transport.cc third_party/blink/renderer/platform/graphics/gpu/xr_frame_transport.cc
+index f8b203fee866d..53174fa93d02b 100644
+--- third_party/blink/renderer/platform/graphics/gpu/xr_frame_transport.cc
++++ third_party/blink/renderer/platform/graphics/gpu/xr_frame_transport.cc
+@@ -139,10 +139,10 @@ void XRFrameTransport::FrameSubmit(
+     // We decompose the cloned handle, and use it to create a
+     // mojo::PlatformHandle which will own cleanup of the handle, and will be
+     // passed over IPC.
+-    gfx::GpuMemoryBufferHandle gpu_handle = gpu_memory_buffer->CloneHandle();
+-    vr_presentation_provider->SubmitFrameWithTextureHandle(
++    //gfx::GpuMemoryBufferHandle gpu_handle = gpu_memory_buffer->CloneHandle();
++    /*vr_presentation_provider->SubmitFrameWithTextureHandle(
+         vr_frame_id, mojo::PlatformHandle(std::move(gpu_handle.dxgi_handle)),
+-        sync_token);
++        sync_token);*/
+ #else
+     NOTIMPLEMENTED();
+ #endif
+diff --git ui/gfx/gpu_memory_buffer.cc ui/gfx/gpu_memory_buffer.cc
+index a49e5bb559f22..98656216292df 100644
+--- ui/gfx/gpu_memory_buffer.cc
++++ ui/gfx/gpu_memory_buffer.cc
+@@ -15,19 +15,6 @@
+ 
+ namespace gfx {
+ 
+-#if BUILDFLAG(IS_WIN)
+-namespace {
+-base::win::ScopedHandle CloneDXGIHandle(HANDLE handle) {
+-  HANDLE target_handle = nullptr;
+-  if (!::DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(),
+-                         &target_handle, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+-    DVLOG(1) << "Error duplicating GMB DXGI handle. error=" << GetLastError();
+-  }
+-  return base::win::ScopedHandle(target_handle);
+-}
+-}  // namespace
+-#endif
+-
+ GpuMemoryBufferHandle::GpuMemoryBufferHandle() = default;
+ 
+ #if BUILDFLAG(IS_ANDROID)
+@@ -59,7 +46,7 @@ GpuMemoryBufferHandle GpuMemoryBufferHandle::Clone() const {
+ #elif BUILDFLAG(IS_MAC)
+   handle.io_surface = io_surface;
+ #elif BUILDFLAG(IS_WIN)
+-  handle.dxgi_handle = CloneDXGIHandle(dxgi_handle.Get());
++  handle.dxgi_handle = dxgi_handle;
+   handle.dxgi_token = dxgi_token;
+ #elif BUILDFLAG(IS_ANDROID)
+   NOTIMPLEMENTED();
+diff --git ui/gfx/gpu_memory_buffer.h ui/gfx/gpu_memory_buffer.h
+index 7bb66fa2ade18..9b661572e20a5 100644
+--- ui/gfx/gpu_memory_buffer.h
++++ ui/gfx/gpu_memory_buffer.h
+@@ -83,7 +83,7 @@ struct GFX_EXPORT GpuMemoryBufferHandle {
+ #elif BUILDFLAG(IS_MAC)
+   ScopedIOSurface io_surface;
+ #elif BUILDFLAG(IS_WIN)
+-  base::win::ScopedHandle dxgi_handle;
++  uint64_t dxgi_handle = 0;
+   absl::optional<DXGIHandleToken> dxgi_token;
+ #elif BUILDFLAG(IS_ANDROID)
+   base::android::ScopedHardwareBufferHandle android_hardware_buffer;
+diff --git ui/gfx/mojom/buffer_types_mojom_traits.cc ui/gfx/mojom/buffer_types_mojom_traits.cc
+index 154c2ddeaa9ea..0fad11885c0ef 100644
+--- ui/gfx/mojom/buffer_types_mojom_traits.cc
++++ ui/gfx/mojom/buffer_types_mojom_traits.cc
+@@ -52,11 +52,11 @@ gfx::mojom::GpuMemoryBufferPlatformHandlePtr StructTraits<
+     }
+     case gfx::DXGI_SHARED_HANDLE:
+ #if BUILDFLAG(IS_WIN)
+-      DCHECK(handle.dxgi_handle.IsValid());
++      //DCHECK(handle.dxgi_handle.IsValid());
+       DCHECK(handle.dxgi_token.has_value());
+       return gfx::mojom::GpuMemoryBufferPlatformHandle::NewDxgiHandle(
+           gfx::mojom::DXGIHandle::New(
+-              mojo::PlatformHandle(std::move(handle.dxgi_handle)),
++              std::move(handle.dxgi_handle),
+               std::move(handle.dxgi_token.value()), std::move(handle.region)));
+ #else
+       break;
+@@ -141,7 +141,7 @@ bool StructTraits<gfx::mojom::GpuMemoryBufferHandleDataView,
+     case gfx::mojom::GpuMemoryBufferPlatformHandleDataView::Tag::kDxgiHandle: {
+       out->type = gfx::DXGI_SHARED_HANDLE;
+       auto dxgi_handle = std::move(platform_handle->get_dxgi_handle());
+-      out->dxgi_handle = dxgi_handle->buffer_handle.TakeHandle();
++      out->dxgi_handle = dxgi_handle->buffer_handle;
+       out->dxgi_token = std::move(dxgi_handle->token);
+       out->region = std::move(dxgi_handle->shared_memory_handle);
+       return true;
+diff --git ui/gfx/mojom/native_handle_types.mojom ui/gfx/mojom/native_handle_types.mojom
+index d8079b3810423..1609ce88c8463 100644
+--- ui/gfx/mojom/native_handle_types.mojom
++++ ui/gfx/mojom/native_handle_types.mojom
+@@ -59,7 +59,7 @@ struct DXGIHandleToken {
+ [EnableIf=is_win]
+ struct DXGIHandle {
+   // The actual buffer windows handle.
+-  handle<platform> buffer_handle;
++  uint64 buffer_handle;
+ 
+   // A unique identifier for the texture corresponding to this GMB handle. This
+   // is needed because there's no other way to uniquely identify the underlying
+diff --git ui/gl/direct_composition_surface_win_unittest.cc ui/gl/direct_composition_surface_win_unittest.cc
+index 741c3dd30425f..446074697fb05 100644
+--- ui/gl/direct_composition_surface_win_unittest.cc
++++ ui/gl/direct_composition_surface_win_unittest.cc
+@@ -95,8 +95,7 @@ Microsoft::WRL::ComPtr<ID3D11Texture2D> CreateNV12Texture(
+   desc.SampleDesc.Count = 1;
+   desc.BindFlags = 0;
+   if (shared) {
+-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED |
+-                     D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
++    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+   }
+ 
+   std::vector<char> image_data(size.width() * size.height() * 3 / 2);
+diff --git ui/gl/gl_image_dxgi.cc ui/gl/gl_image_dxgi.cc
+index 6f05585e228ca..8c01effd85b0a 100644
+--- ui/gl/gl_image_dxgi.cc
++++ ui/gl/gl_image_dxgi.cc
+@@ -144,7 +144,7 @@ GLImageDXGI::BindOrCopy GLImageDXGI::ShouldBindOrCopy() {
+ }
+ 
+ bool GLImageDXGI::BindTexImage(unsigned target) {
+-  if (!handle_.Get())
++  if (!handle_)
+     return true;
+ 
+   DCHECK(texture_);
+@@ -180,7 +180,7 @@ bool GLImageDXGI::CopyTexSubImage(unsigned target,
+ void GLImageDXGI::Flush() {}
+ 
+ unsigned GLImageDXGI::GetInternalFormat() {
+-  if (!handle_.Get())
++  if (!handle_)
+     return GL_BGRA_EXT;
+   else
+     return HasAlpha(buffer_format_) ? GL_RGBA : GL_RGB;
+@@ -203,7 +203,7 @@ void GLImageDXGI::OnMemoryDump(base::trace_event::ProcessMemoryDump* pmd,
+                                const std::string& dump_name) {}
+ 
+ void GLImageDXGI::ReleaseTexImage(unsigned target) {
+-  if (!handle_.Get())
++  if (!handle_)
+     return;
+ 
+   DCHECK(texture_);
+@@ -223,7 +223,7 @@ void GLImageDXGI::ReleaseTexImage(unsigned target) {
+                      surface_, EGL_BACK_BUFFER);
+ }
+ 
+-bool GLImageDXGI::InitializeHandle(base::win::ScopedHandle handle,
++bool GLImageDXGI::InitializeHandle(uint64_t handle,
+                                    uint32_t level,
+                                    gfx::BufferFormat format) {
+   level_ = level;
+@@ -233,12 +233,8 @@ bool GLImageDXGI::InitializeHandle(base::win::ScopedHandle handle,
+   if (!d3d11_device)
+     return false;
+ 
+-  Microsoft::WRL::ComPtr<ID3D11Device1> d3d11_device1;
+-  if (FAILED(d3d11_device.As(&d3d11_device1)))
+-    return false;
+-
+-  if (FAILED(d3d11_device1->OpenSharedResource1(handle.Get(),
+-                                                IID_PPV_ARGS(&staging_)))) {
++  if (FAILED(d3d11_device->OpenSharedResource(HANDLE(handle),
++                                               IID_PPV_ARGS(&staging_)))) {
+     return false;
+   }
+   D3D11_TEXTURE2D_DESC desc;
+@@ -249,7 +245,7 @@ bool GLImageDXGI::InitializeHandle(base::win::ScopedHandle handle,
+   desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+   desc.MiscFlags = 0;
+ 
+-  if (FAILED(d3d11_device1->CreateTexture2D(&desc, nullptr, &texture_))) {
++  if (FAILED(d3d11_device->CreateTexture2D(&desc, nullptr, &texture_))) {
+      return false;
+   }
+ 
+@@ -265,7 +261,7 @@ void GLImageDXGI::SetTexture(
+ }
+ 
+ GLImageDXGI::~GLImageDXGI() {
+-  if (handle_.Get()) {
++  if (handle_) {
+     if (surface_ != EGL_NO_SURFACE) {
+       eglDestroySurface(
+           gl::GLSurfaceEGL::GetGLDisplayEGL()->GetHardwareDisplay(), surface_);
+diff --git ui/gl/gl_image_dxgi.h ui/gl/gl_image_dxgi.h
+index 91596e4e3c412..010fb9835d3fb 100644
+--- ui/gl/gl_image_dxgi.h
++++ ui/gl/gl_image_dxgi.h
+@@ -47,7 +47,7 @@ class GL_EXPORT GLImageDXGI : public GLImage {
+   size_t level() const { return level_; }
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture() { return texture_; }
+ 
+-  bool InitializeHandle(base::win::ScopedHandle handle,
++  bool InitializeHandle(uint64_t handle,
+                         uint32_t level,
+                         gfx::BufferFormat format);
+   void SetTexture(const Microsoft::WRL::ComPtr<ID3D11Texture2D>& texture,
+@@ -57,7 +57,7 @@ class GL_EXPORT GLImageDXGI : public GLImage {
+   ~GLImageDXGI() override;
+ 
+   gfx::BufferFormat buffer_format_ = gfx::BufferFormat::BGRA_8888;
+-  base::win::ScopedHandle handle_;
++  uint64_t handle_;
+   size_t level_ = 0;
+   gfx::Size size_;
+   EGLSurface surface_ = nullptr;
+diff --git ui/gl/gl_image_dxgi_unittest.cc ui/gl/gl_image_dxgi_unittest.cc
+index f388966098b44..7181a7a2a6fbc 100644
+--- ui/gl/gl_image_dxgi_unittest.cc
++++ ui/gl/gl_image_dxgi_unittest.cc
+@@ -35,8 +35,7 @@ class GLImageDXGITestDelegate : public GLImageTestDelegateBase {
+     desc.Usage = D3D11_USAGE_DEFAULT;
+     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+     desc.CPUAccessFlags = 0;
+-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+-                     D3D11_RESOURCE_MISC_SHARED;
++    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+ 
+     std::vector<unsigned char> originalData(size.width() * size.height() * 4);
+     for (int x = 0; x < size.width(); ++x) {
+diff --git ui/gl/swap_chain_presenter.cc ui/gl/swap_chain_presenter.cc
+index 8c17b8e6eca05..45c6e36658246 100644
+--- ui/gl/swap_chain_presenter.cc
++++ ui/gl/swap_chain_presenter.cc
+@@ -725,8 +725,7 @@ bool SwapChainPresenter::TryPresentToDecodeSwapChain(
+     // thread and D3D device.  See https://crbug.com/911847
+     bool is_shared_texture =
+         texture_desc.MiscFlags &
+-        (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
+-         D3D11_RESOURCE_MISC_SHARED_NTHANDLE);
++        (D3D11_RESOURCE_MISC_SHARED);
+ 
+     // DXVA decoder (or rather MFT) sometimes gives texture arrays with one
+     // element, which constitutes most of decode swap chain creation failures.

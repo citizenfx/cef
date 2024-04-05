@@ -1,0 +1,105 @@
+diff --git third_party/blink/renderer/core/paint/background_image_geometry.cc third_party/blink/renderer/core/paint/background_image_geometry.cc
+index c3aad44662720..1f02feeec0283 100644
+--- third_party/blink/renderer/core/paint/background_image_geometry.cc
++++ third_party/blink/renderer/core/paint/background_image_geometry.cc
+@@ -425,13 +425,13 @@ BackgroundImageGeometry::BackgroundImageGeometry(
+     // specified for that element. For all other elements that are effected
+     // by a transform, a value of fixed for the background-attachment property
+     // is treated as if it had a value of scroll.
+-    for (const PaintLayer* layer = box->EnclosingLayer();
+-         layer && !layer->IsRootLayer(); layer = layer->Parent()) {
+-      // Check LayoutObject::HasTransformRelatedProperty() first to exclude
+-      // non-applicable transforms and will-change: transform.
+-      if (layer->GetLayoutObject().HasTransformRelatedProperty() &&
+-          (layer->Transform() ||
+-           layer->GetLayoutObject().StyleRef().HasWillChangeTransformHint())) {
++    for (const LayoutObject* container = box;
++         container && !IsA<LayoutView>(container);
++         container = container->Container()) {
++      // Not using HasTransformRelatedProperty(), to excludes will-change:
++      // transform, etc. Otherwise at least
++      // compositing/backgrounds/fixed-backgrounds.html will fail.
++      if (container->HasTransform()) {
+         has_background_fixed_to_viewport_ = false;
+         break;
+       }
+diff --git third_party/blink/web_tests/compositing/backgrounds/fixed-background-on-descendant.html third_party/blink/web_tests/compositing/backgrounds/fixed-background-on-descendant.html
+index 3fe07e2a4c6bd..9223c24392a7f 100644
+--- third_party/blink/web_tests/compositing/backgrounds/fixed-background-on-descendant.html
++++ third_party/blink/web_tests/compositing/backgrounds/fixed-background-on-descendant.html
+@@ -32,7 +32,7 @@
+     }
+ 
+     .composited {
+-        will-change: opacity;
++        will-change: transform;
+     }
+ </style>
+ <script>
+diff --git third_party/blink/web_tests/compositing/backgrounds/fixed-backgrounds.html third_party/blink/web_tests/compositing/backgrounds/fixed-backgrounds.html
+index 5d1153dbc2573..02689bea7f4a8 100644
+--- third_party/blink/web_tests/compositing/backgrounds/fixed-backgrounds.html
++++ third_party/blink/web_tests/compositing/backgrounds/fixed-backgrounds.html
+@@ -22,7 +22,7 @@
+     }
+ 
+     .composited {
+-        will-change: opacity;
++        will-change: transform;
+     }
+ </style>
+ <script>
+diff --git third_party/blink/web_tests/external/wpt/css/css-transforms/transform-fixed-bg-008.tentative.html third_party/blink/web_tests/external/wpt/css/css-transforms/transform-fixed-bg-008.tentative.html
+deleted file mode 100644
+index d2fc4b6244e04..0000000000000
+--- third_party/blink/web_tests/external/wpt/css/css-transforms/transform-fixed-bg-008.tentative.html
++++ /dev/null
+@@ -1,35 +0,0 @@
+-<!DOCTYPE html>
+-<html>
+-  <head>
+-    <title>CSS Test (Transforms): Fixed Background (will-change: transform)</title>
+-    <link rel="help" href="http://www.w3.org/TR/css-transforms-1/#transform-rendering">
+-    <link rel="help" href="https://github.com/w3c/csswg-drafts/issues/6951">
+-    <meta name="assert" content='"Fixed backgrounds on the root element are
+-    affected by any transform specified for that element. For all other
+-    elements that are effected by a transform (i.e. have a transform applied
+-    to them, or to any of their ancestor elements), a value of fixed for the
+-    background-attachment property is treated as if it had a value of scroll."
+-    This tests that adding will-change: transform to an element with a fixed
+-    background doesn&apos;t change rendering from scroll background.'>
+-    <meta name="flags" content="svg">
+-    <link rel="match" href="transform-fixed-bg-ref.html">
+-    <meta name="fuzzy" content="0-5;0-200">
+-    <style>
+-      body {
+-        margin: 0;
+-      }
+-      div {
+-        background: url(support/transform-triangle-left.svg) fixed;
+-        width: 100px;
+-        height: 100px;
+-        position: relative;
+-        left: 50px;
+-        top: 50px;
+-        will-change: transform;
+-      }
+-    </style>
+-  </head>
+-  <body>
+-    <div></div>
+-  </body>
+-</html>
+diff --git third_party/blink/web_tests/external/wpt/css/cssom-view/add-background-attachment-fixed-during-smooth-scroll.html third_party/blink/web_tests/external/wpt/css/cssom-view/add-background-attachment-fixed-during-smooth-scroll.html
+index 6600c0e0555ce..a031b3715a34b 100644
+--- third_party/blink/web_tests/external/wpt/css/cssom-view/add-background-attachment-fixed-during-smooth-scroll.html
++++ third_party/blink/web_tests/external/wpt/css/cssom-view/add-background-attachment-fixed-during-smooth-scroll.html
+@@ -11,7 +11,7 @@
+   height: 200px;
+   overflow: scroll;
+   background: linear-gradient(green, blue);
+-  will-change: scroll-position;
++  will-change: transform;
+ }
+ #content {
+   width: 7500px;

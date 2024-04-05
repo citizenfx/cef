@@ -1,0 +1,637 @@
+diff --git cc/paint/paint_image.cc cc/paint/paint_image.cc
+index ed3a8f512146c..d8a27e33c6c10 100644
+--- cc/paint/paint_image.cc
++++ cc/paint/paint_image.cc
+@@ -71,6 +71,8 @@ bool PaintImage::operator==(const PaintImage& other) const {
+     return false;
+   if (paint_worklet_input_ != other.paint_worklet_input_)
+     return false;
++  // Do not check may_be_lcp_candidate_ as it should not affect any rendering
++  // operation, only metrics collection.
+   return true;
+ }
+ 
+@@ -397,6 +399,7 @@ std::string PaintImage::ToString() const {
+       << " animation_type_: " << static_cast<int>(animation_type_)
+       << " completion_state_: " << static_cast<int>(completion_state_)
+       << " is_multipart_: " << is_multipart_
++      << " may_be_lcp_candidate_: " << may_be_lcp_candidate_
+       << " is YUV: " << IsYuv(SkYUVAPixmapInfo::SupportedDataTypes::All());
+   return str.str();
+ }
+diff --git cc/paint/paint_image.h cc/paint/paint_image.h
+index 32cbb7fdaeb38..859f4487dc8db 100644
+--- cc/paint/paint_image.h
++++ cc/paint/paint_image.h
+@@ -264,6 +264,7 @@ class CC_PAINT_EXPORT PaintImage {
+   CompletionState completion_state() const { return completion_state_; }
+   bool is_multipart() const { return is_multipart_; }
+   bool is_high_bit_depth() const { return is_high_bit_depth_; }
++  bool may_be_lcp_candidate() const { return may_be_lcp_candidate_; }
+   int repetition_count() const { return repetition_count_; }
+   bool ShouldAnimate() const;
+   AnimationSequenceId reset_animation_sequence_id() const {
+@@ -389,6 +390,12 @@ class CC_PAINT_EXPORT PaintImage {
+   // Whether this image has more than 8 bits per color channel.
+   bool is_high_bit_depth_ = false;
+ 
++  // Whether this image may untimately be a candidate for Largest Contentful
++  // Paint. The final LCP contribution of an image is unknown until we present
++  // it, but this flag is intended for metrics on when we do not present the
++  // image when the system claims.
++  bool may_be_lcp_candidate_ = false;
++
+   // An incrementing sequence number maintained by the painter to indicate if
+   // this animation should be reset in the compositor. Incrementing this number
+   // will reset this animation in the compositor for the first frame which has a
+diff --git cc/paint/paint_image_builder.h cc/paint/paint_image_builder.h
+index 008d0fa5dc074..f75c3ffc06e02 100644
+--- cc/paint/paint_image_builder.h
++++ cc/paint/paint_image_builder.h
+@@ -87,6 +87,10 @@ class CC_PAINT_EXPORT PaintImageBuilder {
+     paint_image_.is_high_bit_depth_ = is_high_bit_depth;
+     return std::move(*this);
+   }
++  PaintImageBuilder&& set_may_be_lcp_candidate(bool may_be_lcp_candidate) {
++    paint_image_.may_be_lcp_candidate_ = may_be_lcp_candidate;
++    return std::move(*this);
++  }
+   PaintImageBuilder&& set_repetition_count(int count) {
+     paint_image_.repetition_count_ = count;
+     return std::move(*this);
+diff --git third_party/blink/renderer/core/paint/box_painter_base.cc third_party/blink/renderer/core/paint/box_painter_base.cc
+index da3e56c7b2f98..0b80634f3e2e2 100644
+--- third_party/blink/renderer/core/paint/box_painter_base.cc
++++ third_party/blink/renderer/core/paint/box_painter_base.cc
+@@ -527,7 +527,8 @@ void DrawTiledBackground(LocalFrame* frame,
+                          Image* image,
+                          const BackgroundImageGeometry& geometry,
+                          SkBlendMode op,
+-                         RespectImageOrientationEnum respect_orientation) {
++                         RespectImageOrientationEnum respect_orientation,
++                         bool image_may_be_lcp_candidate) {
+   DCHECK(!geometry.TileSize().IsEmpty());
+ 
+   const gfx::RectF dest_rect(geometry.SnappedDestRect());
+@@ -543,7 +544,8 @@ void DrawTiledBackground(LocalFrame* frame,
+     auto image_auto_dark_mode = ImageClassifierHelper::GetImageAutoDarkMode(
+         *frame, style, dest_rect, *single_tile_src);
+     context.DrawImage(image, Image::kSyncDecode, image_auto_dark_mode,
+-                      dest_rect, &*single_tile_src, op, respect_orientation);
++                      dest_rect, &*single_tile_src, op, respect_orientation,
++                      image_may_be_lcp_candidate);
+     return;
+   }
+ 
+@@ -589,7 +591,7 @@ void DrawTiledBackground(LocalFrame* frame,
+   // it into the snapped_dest_rect using phase from one_tile_rect and the
+   // given repeat spacing. Note the phase is already scaled.
+   context.DrawImageTiled(image, dest_rect, tiling_info, image_auto_dark_mode,
+-                         op, respect_orientation);
++                         op, respect_orientation, image_may_be_lcp_candidate);
+ }
+ 
+ scoped_refptr<Image> GetBGColorPaintWorkletImage(const Document* document,
+@@ -632,7 +634,7 @@ bool PaintBGColorWithPaintWorklet(const Document* document,
+   return true;
+ }
+ 
+-void DidDrawImage(
++bool WillDrawImage(
+     Node* node,
+     const Image& image,
+     const StyleImage& style_image,
+@@ -640,17 +642,19 @@ void DidDrawImage(
+     const gfx::RectF& image_rect) {
+   Node* generating_node = GeneratingNode(node);
+   if (!generating_node || !style_image.IsImageResource())
+-    return;
++    return false;
+   const gfx::Rect enclosing_rect = gfx::ToEnclosingRect(image_rect);
+-  PaintTimingDetector::NotifyBackgroundImagePaint(
+-      *generating_node, image, To<StyleFetchedImage>(style_image),
+-      current_paint_chunk_properties, enclosing_rect);
++  bool image_may_be_lcp_candidate =
++      PaintTimingDetector::NotifyBackgroundImagePaint(
++          *generating_node, image, To<StyleFetchedImage>(style_image),
++          current_paint_chunk_properties, enclosing_rect);
+ 
+   LocalDOMWindow* window = node->GetDocument().domWindow();
+   DCHECK(window);
+   ImageElementTiming::From(*window).NotifyBackgroundImagePainted(
+       *generating_node, To<StyleFetchedImage>(style_image),
+       current_paint_chunk_properties, enclosing_rect);
++  return image_may_be_lcp_candidate;
+ }
+ 
+ inline bool PaintFastBottomLayer(const Document* document,
+@@ -753,17 +757,19 @@ inline bool PaintFastBottomLayer(const Document* document,
+       inspector_paint_image_event::Data, node, *info.image,
+       gfx::RectF(image->Rect()), gfx::RectF(image_border.Rect()));
+ 
++  bool may_be_lcp_candidate =
++      WillDrawImage(node, *image, *info.image,
++                    context.GetPaintController().CurrentPaintChunkProperties(),
++                    image_border.Rect());
++
+   auto image_auto_dark_mode = ImageClassifierHelper::GetImageAutoDarkMode(
+       *document->GetFrame(), style, image_border.Rect(), src_rect);
+   // Since there is no way for the developer to specify decode behavior, use
+   // kSync by default.
+   context.DrawImageRRect(image, Image::kSyncDecode, image_auto_dark_mode,
+                          image_border, src_rect, composite_op,
+-                         info.respect_image_orientation);
++                         info.respect_image_orientation, may_be_lcp_candidate);
+ 
+-  DidDrawImage(node, *image, *info.image,
+-               context.GetPaintController().CurrentPaintChunkProperties(),
+-               image_border.Rect());
+   return true;
+ }
+ 
+@@ -882,11 +888,13 @@ void PaintFillLayerBackground(const Document* document,
+         TRACE_DISABLED_BY_DEFAULT("devtools.timeline"), "PaintImage",
+         inspector_paint_image_event::Data, node, *info.image,
+         gfx::RectF(image->Rect()), gfx::RectF(scrolled_paint_rect));
++    bool may_be_lcp_candidate = WillDrawImage(
++        node, *image, *info.image,
++        context.GetPaintController().CurrentPaintChunkProperties(),
++        gfx::RectF(geometry.SnappedDestRect()));
+     DrawTiledBackground(document->GetFrame(), context, style, image, geometry,
+-                        composite_op, info.respect_image_orientation);
+-    DidDrawImage(node, *image, *info.image,
+-                 context.GetPaintController().CurrentPaintChunkProperties(),
+-                 gfx::RectF(geometry.SnappedDestRect()));
++                        composite_op, info.respect_image_orientation,
++                        may_be_lcp_candidate);
+   }
+ }
+ 
+diff --git third_party/blink/renderer/core/paint/image_paint_timing_detector.cc third_party/blink/renderer/core/paint/image_paint_timing_detector.cc
+index 1d209b3dd3f74..946d5da0ac0ea 100644
+--- third_party/blink/renderer/core/paint/image_paint_timing_detector.cc
++++ third_party/blink/renderer/core/paint/image_paint_timing_detector.cc
+@@ -277,7 +277,7 @@ void ImageRecordsManager::AssignPaintTimeToRegisteredQueuedRecords(
+   }
+ }
+ 
+-void ImagePaintTimingDetector::RecordImage(
++bool ImagePaintTimingDetector::RecordImage(
+     const LayoutObject& object,
+     const gfx::Size& intrinsic_size,
+     const MediaTiming& media_timing,
+@@ -287,12 +287,12 @@ void ImagePaintTimingDetector::RecordImage(
+   Node* node = object.GetNode();
+ 
+   if (!node)
+-    return;
++    return false;
+ 
+   // Before the image resource starts loading, <img> has no size info. We wait
+   // until the size is known.
+   if (image_border.IsEmpty())
+-    return;
++    return false;
+ 
+   RecordId record_id = std::make_pair(&object, &media_timing);
+ 
+@@ -311,14 +311,14 @@ void ImagePaintTimingDetector::RecordImage(
+       records_manager_.MaybeUpdateLargestIgnoredImage(
+           record_id, rect_size, image_border, mapped_visual_rect);
+     }
+-    return;
++    return false;
+   }
+ 
+   if (records_manager_.IsRecordedImage(record_id)) {
+     base::WeakPtr<ImageRecord> record =
+         records_manager_.GetPendingImage(record_id);
+     if (!record)
+-      return;
++      return false;
+     if (ShouldReportAnimatedImages() && media_timing.IsPaintedFirstFrame()) {
+       added_entry_in_latest_frame_ |=
+           records_manager_.OnFirstAnimatedFramePainted(record_id, frame_index_);
+@@ -334,8 +334,9 @@ void ImagePaintTimingDetector::RecordImage(
+         visualizer->DumpImageDebuggingRect(object, mapped_visual_rect,
+                                            media_timing);
+       }
++      return true;
+     }
+-    return;
++    return false;
+   }
+ 
+   gfx::RectF mapped_visual_rect =
+@@ -352,7 +353,7 @@ void ImagePaintTimingDetector::RecordImage(
+   bool added_pending = records_manager_.RecordFirstPaintAndReturnIsPending(
+       record_id, rect_size, image_border, mapped_visual_rect, bpp);
+   if (!added_pending)
+-    return;
++    return false;
+ 
+   if (ShouldReportAnimatedImages() && media_timing.IsPaintedFirstFrame()) {
+     added_entry_in_latest_frame_ |=
+@@ -361,7 +362,9 @@ void ImagePaintTimingDetector::RecordImage(
+   if (media_timing.IsSufficientContentLoadedForPaint()) {
+     records_manager_.OnImageLoaded(record_id, frame_index_, style_image);
+     added_entry_in_latest_frame_ = true;
++    return true;
+   }
++  return false;
+ }
+ 
+ uint64_t ImagePaintTimingDetector::ComputeImageRectSize(
+diff --git third_party/blink/renderer/core/paint/image_paint_timing_detector.h third_party/blink/renderer/core/paint/image_paint_timing_detector.h
+index b21059065727e..2af69840ca396 100644
+--- third_party/blink/renderer/core/paint/image_paint_timing_detector.h
++++ third_party/blink/renderer/core/paint/image_paint_timing_detector.h
+@@ -243,8 +243,10 @@ class CORE_EXPORT ImagePaintTimingDetector final
+   // Record an image paint. This method covers both img and background image. In
+   // the case of a normal img, the last parameter will be nullptr. This
+   // parameter is needed only for the purposes of plumbing the correct loadTime
+-  // value to the ImageRecord.
+-  void RecordImage(const LayoutObject&,
++  // value to the ImageRecord. The method returns true if the image is a
++  // candidate for LargestContentfulPaint. That is, if the image is larger
++  // on screen than the current best candidate.
++  bool RecordImage(const LayoutObject&,
+                    const gfx::Size& intrinsic_size,
+                    const MediaTiming&,
+                    const PropertyTreeStateOrAlias& current_paint_properties,
+diff --git third_party/blink/renderer/core/paint/image_painter.cc third_party/blink/renderer/core/paint/image_painter.cc
+index d041b4c13e86e..6d10320098e23 100644
+--- third_party/blink/renderer/core/paint/image_painter.cc
++++ third_party/blink/renderer/core/paint/image_painter.cc
+@@ -260,10 +260,10 @@ void ImagePainter::PaintIntoRect(GraphicsContext& context,
+       *layout_image_.GetFrame(), layout_image_.StyleRef(),
+       gfx::RectF(pixel_snapped_dest_rect), src_rect);
+ 
+-  context.DrawImage(image.get(), decode_mode, image_auto_dark_mode,
+-                    gfx::RectF(pixel_snapped_dest_rect), &src_rect,
+-                    SkBlendMode::kSrcOver, respect_orientation);
+-
++  // At this point we have all the necessary information to report paint
++  // timing data. Do so now in order to mark the resulting PaintImage as
++  // an LCP candidate.
++  bool image_may_be_lcp_candidate = false;
+   if (ImageResourceContent* image_content = image_resource.CachedImage()) {
+     if ((IsA<HTMLImageElement>(node) || IsA<HTMLVideoElement>(node)) &&
+         image_content->IsLoaded()) {
+@@ -274,11 +274,16 @@ void ImagePainter::PaintIntoRect(GraphicsContext& context,
+           context.GetPaintController().CurrentPaintChunkProperties(),
+           pixel_snapped_dest_rect);
+     }
+-    PaintTimingDetector::NotifyImagePaint(
++    image_may_be_lcp_candidate = PaintTimingDetector::NotifyImagePaint(
+         layout_image_, image->Size(), *image_content,
+         context.GetPaintController().CurrentPaintChunkProperties(),
+         pixel_snapped_dest_rect);
+   }
++
++  context.DrawImage(image.get(), decode_mode, image_auto_dark_mode,
++                    gfx::RectF(pixel_snapped_dest_rect), &src_rect,
++                    SkBlendMode::kSrcOver, respect_orientation,
++                    image_may_be_lcp_candidate);
+ }
+ 
+ }  // namespace blink
+diff --git third_party/blink/renderer/core/paint/paint_timing_detector.cc third_party/blink/renderer/core/paint/paint_timing_detector.cc
+index 08033ebd86561..4a0827802060c 100644
+--- third_party/blink/renderer/core/paint/paint_timing_detector.cc
++++ third_party/blink/renderer/core/paint/paint_timing_detector.cc
+@@ -113,7 +113,7 @@ void PaintTimingDetector::NotifyPaintFinished() {
+ }
+ 
+ // static
+-void PaintTimingDetector::NotifyBackgroundImagePaint(
++bool PaintTimingDetector::NotifyBackgroundImagePaint(
+     const Node& node,
+     const Image& image,
+     const StyleFetchedImage& style_image,
+@@ -122,48 +122,49 @@ void PaintTimingDetector::NotifyBackgroundImagePaint(
+   DCHECK(style_image.CachedImage());
+   LayoutObject* object = node.GetLayoutObject();
+   if (!object)
+-    return;
++    return false;
+   LocalFrameView* frame_view = object->GetFrameView();
+   if (!frame_view)
+-    return;
++    return false;
+ 
+   ImagePaintTimingDetector* detector =
+       frame_view->GetPaintTimingDetector().GetImagePaintTimingDetector();
+   if (!detector)
+-    return;
++    return false;
+ 
+   if (!IsBackgroundImageContentful(*object, image))
+-    return;
++    return false;
+ 
+   ImageResourceContent* cached_image = style_image.CachedImage();
+   DCHECK(cached_image);
+   // TODO(yoav): |image| and |cached_image.GetImage()| are not the same here in
+   // the case of SVGs. Figure out why and if we can remove this footgun.
+ 
+-  detector->RecordImage(*object, image.Size(), *cached_image,
+-                        current_paint_chunk_properties, &style_image,
+-                        image_border);
++  return detector->RecordImage(*object, image.Size(), *cached_image,
++                               current_paint_chunk_properties, &style_image,
++                               image_border);
+ }
+ 
+ // static
+-void PaintTimingDetector::NotifyImagePaint(
++bool PaintTimingDetector::NotifyImagePaint(
+     const LayoutObject& object,
+     const gfx::Size& intrinsic_size,
+     const MediaTiming& media_timing,
+     const PropertyTreeStateOrAlias& current_paint_chunk_properties,
+     const gfx::Rect& image_border) {
+   if (IgnorePaintTimingScope::ShouldIgnore())
+-    return;
++    return false;
+   LocalFrameView* frame_view = object.GetFrameView();
+   if (!frame_view)
+-    return;
++    return false;
+   ImagePaintTimingDetector* detector =
+       frame_view->GetPaintTimingDetector().GetImagePaintTimingDetector();
+   if (!detector)
+-    return;
++    return false;
+ 
+-  detector->RecordImage(object, intrinsic_size, media_timing,
+-                        current_paint_chunk_properties, nullptr, image_border);
++  return detector->RecordImage(object, intrinsic_size, media_timing,
++                               current_paint_chunk_properties, nullptr,
++                               image_border);
+ }
+ 
+ void PaintTimingDetector::NotifyImageFinished(const LayoutObject& object,
+diff --git third_party/blink/renderer/core/paint/paint_timing_detector.h third_party/blink/renderer/core/paint/paint_timing_detector.h
+index 29f5bec1ca151..fdc9a6a0a4d57 100644
+--- third_party/blink/renderer/core/paint/paint_timing_detector.h
++++ third_party/blink/renderer/core/paint/paint_timing_detector.h
+@@ -123,13 +123,19 @@ class CORE_EXPORT PaintTimingDetector
+  public:
+   PaintTimingDetector(LocalFrameView*);
+ 
+-  static void NotifyBackgroundImagePaint(
++  // Returns true if the image might ultimately be a candidate for largest
++  // paint, otherwise false. When this method is called we do not know the
++  // largest status for certain, because we need to wait for presentation.
++  // Hence the "maybe" return value.
++  static bool NotifyBackgroundImagePaint(
+       const Node&,
+       const Image&,
+       const StyleFetchedImage&,
+       const PropertyTreeStateOrAlias& current_paint_chunk_properties,
+       const gfx::Rect& image_border);
+-  static void NotifyImagePaint(
++  // Returns true if the image is a candidate for largest paint, otherwise
++  // false. See the comment for NotifyBackgroundImagePaint(...).
++  static bool NotifyImagePaint(
+       const LayoutObject&,
+       const gfx::Size& intrinsic_size,
+       const MediaTiming& media_timing,
+diff --git third_party/blink/renderer/core/paint/svg_image_painter.cc third_party/blink/renderer/core/paint/svg_image_painter.cc
+index a73cccf2400c0..99644d1096880 100644
+--- third_party/blink/renderer/core/paint/svg_image_painter.cc
++++ third_party/blink/renderer/core/paint/svg_image_painter.cc
+@@ -85,19 +85,8 @@ void SVGImagePainter::PaintForeground(const PaintInfo& paint_info) {
+         dest_rect, src_rect);
+   }
+ 
+-  ScopedInterpolationQuality interpolation_quality_scope(
+-      paint_info.context,
+-      layout_svg_image_.StyleRef().GetInterpolationQuality());
+-  Image::ImageDecodingMode decode_mode =
+-      image_element->GetDecodingModeForPainting(image->paint_image_id());
+-  auto image_auto_dark_mode = ImageClassifierHelper::GetImageAutoDarkMode(
+-      *layout_svg_image_.GetFrame(), layout_svg_image_.StyleRef(), dest_rect,
+-      src_rect);
+-  paint_info.context.DrawImage(image.get(), decode_mode, image_auto_dark_mode,
+-                               dest_rect, &src_rect, SkBlendMode::kSrcOver,
+-                               respect_orientation);
+-
+   ImageResourceContent* image_content = image_resource.CachedImage();
++  bool image_may_be_lcp_candidate = false;
+   if (image_content->IsLoaded()) {
+     LocalDOMWindow* window = layout_svg_image_.GetDocument().domWindow();
+     DCHECK(window);
+@@ -106,12 +95,24 @@ void SVGImagePainter::PaintForeground(const PaintInfo& paint_info) {
+         paint_info.context.GetPaintController().CurrentPaintChunkProperties(),
+         gfx::ToEnclosingRect(dest_rect));
+   }
+-  PaintTimingDetector::NotifyImagePaint(
++  image_may_be_lcp_candidate = PaintTimingDetector::NotifyImagePaint(
+       layout_svg_image_, image->Size(), *image_content,
+       paint_info.context.GetPaintController().CurrentPaintChunkProperties(),
+       gfx::ToEnclosingRect(dest_rect));
+   PaintTiming& timing = PaintTiming::From(layout_svg_image_.GetDocument());
+   timing.MarkFirstContentfulPaint();
++
++  ScopedInterpolationQuality interpolation_quality_scope(
++      paint_info.context,
++      layout_svg_image_.StyleRef().GetInterpolationQuality());
++  Image::ImageDecodingMode decode_mode =
++      image_element->GetDecodingModeForPainting(image->paint_image_id());
++  auto image_auto_dark_mode = ImageClassifierHelper::GetImageAutoDarkMode(
++      *layout_svg_image_.GetFrame(), layout_svg_image_.StyleRef(), dest_rect,
++      src_rect);
++  paint_info.context.DrawImage(image.get(), decode_mode, image_auto_dark_mode,
++                               dest_rect, &src_rect, SkBlendMode::kSrcOver,
++                               respect_orientation, image_may_be_lcp_candidate);
+ }
+ 
+ gfx::SizeF SVGImagePainter::ComputeImageViewportSize() const {
+diff --git third_party/blink/renderer/platform/graphics/accelerated_static_bitmap_image.cc third_party/blink/renderer/platform/graphics/accelerated_static_bitmap_image.cc
+index 1e45dfc1eee46..53ea5f8a9d9e3 100644
+--- third_party/blink/renderer/platform/graphics/accelerated_static_bitmap_image.cc
++++ third_party/blink/renderer/platform/graphics/accelerated_static_bitmap_image.cc
+@@ -225,10 +225,13 @@ void AcceleratedStaticBitmapImage::Draw(cc::PaintCanvas* canvas,
+     return;
+   auto paint_image_decoding_mode =
+       ToPaintImageDecodingMode(draw_options.decode_mode);
+-  if (paint_image.decoding_mode() != paint_image_decoding_mode) {
+-    paint_image = PaintImageBuilder::WithCopy(std::move(paint_image))
+-                      .set_decoding_mode(paint_image_decoding_mode)
+-                      .TakePaintImage();
++  if (paint_image.decoding_mode() != paint_image_decoding_mode ||
++      paint_image.may_be_lcp_candidate() != draw_options.may_be_lcp_candidate) {
++    paint_image =
++        PaintImageBuilder::WithCopy(std::move(paint_image))
++            .set_decoding_mode(paint_image_decoding_mode)
++            .set_may_be_lcp_candidate(draw_options.may_be_lcp_candidate)
++            .TakePaintImage();
+   }
+   StaticBitmapImage::DrawHelper(canvas, flags, dst_rect, src_rect, draw_options,
+                                 paint_image);
+diff --git third_party/blink/renderer/platform/graphics/bitmap_image.cc third_party/blink/renderer/platform/graphics/bitmap_image.cc
+index 46f42d7df8804..bec446e88d579 100644
+--- third_party/blink/renderer/platform/graphics/bitmap_image.cc
++++ third_party/blink/renderer/platform/graphics/bitmap_image.cc
+@@ -263,9 +263,11 @@ void BitmapImage::Draw(cc::PaintCanvas* canvas,
+ 
+   auto paint_image_decoding_mode =
+       ToPaintImageDecodingMode(draw_options.decode_mode);
+-  if (image.decoding_mode() != paint_image_decoding_mode) {
++  if (image.decoding_mode() != paint_image_decoding_mode ||
++      image.may_be_lcp_candidate() != draw_options.may_be_lcp_candidate) {
+     image = PaintImageBuilder::WithCopy(std::move(image))
+                 .set_decoding_mode(paint_image_decoding_mode)
++                .set_may_be_lcp_candidate(draw_options.may_be_lcp_candidate)
+                 .TakePaintImage();
+   }
+ 
+diff --git third_party/blink/renderer/platform/graphics/graphics_context.cc third_party/blink/renderer/platform/graphics/graphics_context.cc
+index 63ce53aba6121..8f967d93907a8 100644
+--- third_party/blink/renderer/platform/graphics/graphics_context.cc
++++ third_party/blink/renderer/platform/graphics/graphics_context.cc
+@@ -751,7 +751,8 @@ void GraphicsContext::DrawImage(
+     const gfx::RectF& dest,
+     const gfx::RectF* src_ptr,
+     SkBlendMode op,
+-    RespectImageOrientationEnum should_respect_image_orientation) {
++    RespectImageOrientationEnum should_respect_image_orientation,
++    bool image_may_be_lcp_candidate) {
+   if (!image)
+     return;
+ 
+@@ -764,7 +765,8 @@ void GraphicsContext::DrawImage(
+   DarkModeFilter* dark_mode_filter = GetDarkModeFilterForImage(auto_dark_mode);
+   ImageDrawOptions draw_options(
+       dark_mode_filter, sampling, should_respect_image_orientation,
+-      Image::kClampImageToSourceRect, decode_mode, auto_dark_mode.enabled);
++      Image::kClampImageToSourceRect, decode_mode, auto_dark_mode.enabled,
++      image_may_be_lcp_candidate);
+ 
+   image->Draw(canvas_, image_flags, dest, src, draw_options);
+   paint_controller_.SetImagePainted();
+@@ -777,13 +779,14 @@ void GraphicsContext::DrawImageRRect(
+     const FloatRoundedRect& dest,
+     const gfx::RectF& src_rect,
+     SkBlendMode op,
+-    RespectImageOrientationEnum respect_orientation) {
++    RespectImageOrientationEnum respect_orientation,
++    bool image_may_be_lcp_candidate) {
+   if (!image)
+     return;
+ 
+   if (!dest.IsRounded()) {
+     DrawImage(image, decode_mode, auto_dark_mode, dest.Rect(), &src_rect, op,
+-              respect_orientation);
++              respect_orientation, image_may_be_lcp_candidate);
+     return;
+   }
+ 
+@@ -803,7 +806,8 @@ void GraphicsContext::DrawImageRRect(
+   DarkModeFilter* dark_mode_filter = GetDarkModeFilterForImage(auto_dark_mode);
+   ImageDrawOptions draw_options(dark_mode_filter, sampling, respect_orientation,
+                                 Image::kClampImageToSourceRect, decode_mode,
+-                                auto_dark_mode.enabled);
++                                auto_dark_mode.enabled,
++                                image_may_be_lcp_candidate);
+ 
+   bool use_shader = (visible_src == src_rect) &&
+                     (respect_orientation == kDoNotRespectImageOrientation ||
+@@ -865,7 +869,8 @@ void GraphicsContext::DrawImageTiled(
+     const ImageTilingInfo& tiling_info,
+     const ImageAutoDarkMode& auto_dark_mode,
+     SkBlendMode op,
+-    RespectImageOrientationEnum respect_orientation) {
++    RespectImageOrientationEnum respect_orientation,
++    bool image_may_be_lcp_candidate) {
+   if (!image)
+     return;
+ 
+@@ -875,7 +880,8 @@ void GraphicsContext::DrawImageTiled(
+   DarkModeFilter* dark_mode_filter = GetDarkModeFilterForImage(auto_dark_mode);
+   ImageDrawOptions draw_options(dark_mode_filter, sampling, respect_orientation,
+                                 Image::kClampImageToSourceRect,
+-                                Image::kSyncDecode, auto_dark_mode.enabled);
++                                Image::kSyncDecode, auto_dark_mode.enabled,
++                                image_may_be_lcp_candidate);
+ 
+   image->DrawPattern(*this, image_flags, dest_rect, tiling_info, draw_options);
+   paint_controller_.SetImagePainted();
+diff --git third_party/blink/renderer/platform/graphics/graphics_context.h third_party/blink/renderer/platform/graphics/graphics_context.h
+index 7804b258c1996..329f05d66f068 100644
+--- third_party/blink/renderer/platform/graphics/graphics_context.h
++++ third_party/blink/renderer/platform/graphics/graphics_context.h
+@@ -93,19 +93,22 @@ struct ImageDrawOptions {
+                             RespectImageOrientationEnum respect_orientation,
+                             Image::ImageClampingMode clamping_mode,
+                             Image::ImageDecodingMode decode_mode,
+-                            bool apply_dark_mode)
++                            bool apply_dark_mode,
++                            bool may_be_lcp_candidate)
+       : dark_mode_filter(dark_mode_filter),
+         sampling_options(sampling_options),
+         respect_orientation(respect_orientation),
+         clamping_mode(clamping_mode),
+         decode_mode(decode_mode),
+-        apply_dark_mode(apply_dark_mode) {}
++        apply_dark_mode(apply_dark_mode),
++        may_be_lcp_candidate(may_be_lcp_candidate) {}
+   DarkModeFilter* dark_mode_filter = nullptr;
+   SkSamplingOptions sampling_options;
+   RespectImageOrientationEnum respect_orientation = kRespectImageOrientation;
+   Image::ImageClampingMode clamping_mode = Image::kClampImageToSourceRect;
+   Image::ImageDecodingMode decode_mode = Image::kSyncDecode;
+   bool apply_dark_mode = false;
++  bool may_be_lcp_candidate = false;
+ };
+ 
+ struct AutoDarkMode {
+@@ -319,20 +322,23 @@ class PLATFORM_EXPORT GraphicsContext {
+                  const gfx::RectF& dest_rect,
+                  const gfx::RectF* src_rect = nullptr,
+                  SkBlendMode = SkBlendMode::kSrcOver,
+-                 RespectImageOrientationEnum = kRespectImageOrientation);
++                 RespectImageOrientationEnum = kRespectImageOrientation,
++                 bool image_may_be_lcp_candidate = false);
+   void DrawImageRRect(Image*,
+                       Image::ImageDecodingMode,
+                       const ImageAutoDarkMode& auto_dark_mode,
+                       const FloatRoundedRect& dest,
+                       const gfx::RectF& src_rect,
+                       SkBlendMode = SkBlendMode::kSrcOver,
+-                      RespectImageOrientationEnum = kRespectImageOrientation);
++                      RespectImageOrientationEnum = kRespectImageOrientation,
++                      bool image_may_be_lcp_candidate = false);
+   void DrawImageTiled(Image* image,
+                       const gfx::RectF& dest_rect,
+                       const ImageTilingInfo& tiling_info,
+                       const ImageAutoDarkMode& auto_dark_mode,
+                       SkBlendMode = SkBlendMode::kSrcOver,
+-                      RespectImageOrientationEnum = kRespectImageOrientation);
++                      RespectImageOrientationEnum = kRespectImageOrientation,
++                      bool image_may_be_lcp_candidate = false);
+ 
+   // These methods write to the canvas.
+   // Also drawLine(const gfx::Point& point1, const gfx::Point& point2) and
+diff --git third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.cc third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.cc
+index 943ca0078fe22..adbcc7d685242 100644
+--- third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.cc
++++ third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.cc
+@@ -79,8 +79,14 @@ void UnacceleratedStaticBitmapImage::Draw(
+     const gfx::RectF& src_rect,
+     const ImageDrawOptions& draw_options) {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  auto image = PaintImageForCurrentFrame();
++  if (image.may_be_lcp_candidate() != draw_options.may_be_lcp_candidate) {
++    image = PaintImageBuilder::WithCopy(std::move(image))
++                .set_may_be_lcp_candidate(draw_options.may_be_lcp_candidate)
++                .TakePaintImage();
++  }
+   StaticBitmapImage::DrawHelper(canvas, flags, dst_rect, src_rect, draw_options,
+-                                PaintImageForCurrentFrame());
++                                image);
+ }
+ 
+ PaintImage UnacceleratedStaticBitmapImage::PaintImageForCurrentFrame() {

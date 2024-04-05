@@ -1,0 +1,526 @@
+diff --git third_party/blink/renderer/core/paint/background_image_geometry.cc third_party/blink/renderer/core/paint/background_image_geometry.cc
+index 1f02feeec0283..1dc05f968c8b7 100644
+--- third_party/blink/renderer/core/paint/background_image_geometry.cc
++++ third_party/blink/renderer/core/paint/background_image_geometry.cc
+@@ -13,14 +13,12 @@
+ #include "third_party/blink/renderer/core/layout/ng/ng_fragmentation_utils.h"
+ #include "third_party/blink/renderer/core/layout/ng/ng_physical_box_fragment.h"
+ #include "third_party/blink/renderer/core/layout/ng/table/layout_ng_table_cell.h"
+-#include "third_party/blink/renderer/core/paint/paint_info.h"
+ #include "third_party/blink/renderer/core/paint/paint_layer.h"
+ #include "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.h"
+ #include "third_party/blink/renderer/core/paint/rounded_border_geometry.h"
+ #include "third_party/blink/renderer/core/style/border_edge.h"
+ #include "third_party/blink/renderer/platform/geometry/layout_rect.h"
+ #include "third_party/blink/renderer/platform/geometry/layout_unit.h"
+-#include "third_party/blink/renderer/platform/graphics/paint/geometry_mapper.h"
+ #include "third_party/blink/renderer/platform/graphics/paint/paint_controller.h"
+ 
+ namespace blink {
+@@ -54,6 +52,25 @@ LayoutUnit ComputeTilePhase(LayoutUnit position, LayoutUnit tile_extent) {
+                      : LayoutUnit();
+ }
+ 
++PhysicalOffset AccumulatedScrollOffsetForFixedBackground(
++    const LayoutBoxModelObject& object,
++    const LayoutBoxModelObject* container) {
++  PhysicalOffset result;
++  if (&object == container)
++    return result;
++
++  LayoutObject::AncestorSkipInfo skip_info(container);
++  for (const LayoutBlock* block = object.ContainingBlock(&skip_info);
++       block && !skip_info.AncestorSkipped();
++       block = block->ContainingBlock(&skip_info)) {
++    if (block->IsScrollContainer())
++      result += block->ScrolledContentOffset();
++    if (block == container)
++      break;
++  }
++  return result;
++}
++
+ }  // anonymous namespace
+ 
+ bool NeedsFullSizeDestination(const FillLayer& fill_layer) {
+@@ -212,7 +229,6 @@ void BackgroundImageGeometry::SetSpaceY(LayoutUnit space,
+ 
+ void BackgroundImageGeometry::UseFixedAttachment(
+     const PhysicalOffset& attachment_point) {
+-  DCHECK(has_background_fixed_to_viewport_);
+   PhysicalOffset fixed_adjustment =
+       attachment_point - unsnapped_dest_rect_.offset;
+   fixed_adjustment.ClampNegativeToZero();
+@@ -312,33 +328,58 @@ PhysicalSize BackgroundImageGeometry::GetBackgroundObjectDimensions(
+ }
+ 
+ bool BackgroundImageGeometry::ShouldUseFixedAttachment(
+-    const FillLayer& fill_layer) const {
+-  // Only backgrounds fixed to viewport should be treated as fixed attachment.
+-  // See comments in the private constructor.
+-  return has_background_fixed_to_viewport_ &&
+-         // Solid color background should use default attachment.
+-         fill_layer.GetImage() &&
++    const FillLayer& fill_layer) {
++  // Solid color background should use default attachment.
++  return fill_layer.GetImage() &&
+          fill_layer.Attachment() == EFillAttachment::kFixed;
+ }
+ 
+ namespace {
+ 
+-PhysicalRect FixedAttachmentPositioningArea(const PaintInfo& paint_info,
+-                                            const LayoutBoxModelObject& obj) {
+-  DCHECK(obj.View());
+-  gfx::PointF viewport_origin_in_local_space =
+-      GeometryMapper::SourceToDestinationProjection(
+-          obj.View()->FirstFragment().LocalBorderBoxProperties().Transform(),
+-          paint_info.context.GetPaintController()
+-              .CurrentPaintChunkProperties()
+-              .Transform())
+-          .MapPoint(gfx::PointF());
+-  DCHECK(obj.GetFrameView());
+-  const ScrollableArea* layout_viewport = obj.GetFrameView()->LayoutViewport();
++PhysicalRect FixedAttachmentPositioningArea(
++    const LayoutBoxModelObject& obj,
++    const LayoutBoxModelObject* container) {
++  // TODO(crbug.com/667006): We should consider ancestor with transform as the
++  // fixed background container, instead of always the viewport.
++  const LocalFrameView* frame_view = obj.GetFrameView();
++  if (!frame_view)
++    return PhysicalRect();
++
++  const ScrollableArea* layout_viewport = frame_view->LayoutViewport();
+   DCHECK(layout_viewport);
+-  return PhysicalRect(
+-      PhysicalOffset::FromPointFRound(viewport_origin_in_local_space),
+-      PhysicalSize(layout_viewport->VisibleContentRect().size()));
++
++  PhysicalRect rect(PhysicalOffset(),
++                    PhysicalSize(layout_viewport->VisibleContentRect().size()));
++
++  if (const auto* layout_view = DynamicTo<LayoutView>(obj)) {
++    if (!(layout_view->GetBackgroundPaintLocation() &
++          kBackgroundPaintInContentsSpace))
++      return rect;
++    // The LayoutView is the only object that can paint a fixed background into
++    // its scrolling contents layer, so it gets a special adjustment here.
++    rect.offset = layout_view->ScrolledContentOffset();
++  }
++
++  rect.Move(AccumulatedScrollOffsetForFixedBackground(obj, container));
++
++  if (!container)
++    return rect;
++
++  rect.Move(
++      -container->LocalToAbsolutePoint(PhysicalOffset(), kIgnoreTransforms));
++
++  // By now we have converted the viewport rect to the border box space of
++  // |container|, however |container| does not necessarily create a paint
++  // offset translation node, thus its paint offset must be added to convert
++  // the rect to the space of the transform node.
++  // TODO(trchen): This function does only one simple thing -- mapping the
++  // viewport rect from frame space to whatever space the current paint
++  // context uses. However we can't always invoke geometry mapper because
++  // there are at least one caller uses this before PrePaint phase.
++  DCHECK_GE(container->GetDocument().Lifecycle().GetState(),
++            DocumentLifecycle::kPrePaintClean);
++  rect.Move(container->FirstFragment().PaintOffset());
++  return rect;
+ }
+ 
+ }  // Anonymous namespace
+@@ -346,10 +387,7 @@ PhysicalRect FixedAttachmentPositioningArea(const PaintInfo& paint_info,
+ BackgroundImageGeometry::BackgroundImageGeometry(
+     const LayoutView& view,
+     const PhysicalOffset& element_positioning_area_offset)
+-    : box_(&view), positioning_box_(&view.RootBox()) {
+-  has_background_fixed_to_viewport_ =
+-      view.StyleRef().HasFixedAttachmentBackgroundImage();
+-  painting_view_ = true;
++    : box_(&view), positioning_box_(&view.RootBox()), painting_view_(true) {
+   // The background of the box generated by the root element covers the
+   // entire canvas and will be painted by the view object, but the we should
+   // still use the root element box for positioning.
+@@ -360,17 +398,19 @@ BackgroundImageGeometry::BackgroundImageGeometry(
+ 
+ BackgroundImageGeometry::BackgroundImageGeometry(
+     const LayoutBoxModelObject& obj)
+-    : BackgroundImageGeometry(&obj, &obj) {}
++    : box_(&obj), positioning_box_(&obj) {
++  // Specialized constructor should be used for LayoutView.
++  DCHECK(!IsA<LayoutView>(obj));
++}
+ 
+ BackgroundImageGeometry::BackgroundImageGeometry(
+     const LayoutTableCell& cell,
+     const LayoutObject* background_object)
+-    : BackgroundImageGeometry(
+-          &cell,
+-          background_object && !background_object->IsTableCell()
+-              ? &To<LayoutBoxModelObject>(*background_object)
+-              : &cell) {
+-  painting_table_cell_ = true;
++    : box_(&cell),
++      positioning_box_(background_object && !background_object->IsTableCell()
++                           ? &To<LayoutBoxModelObject>(*background_object)
++                           : &cell),
++      painting_table_cell_(true) {
+   cell_using_container_background_ =
+       background_object && !background_object->IsTableCell();
+   if (cell_using_container_background_) {
+@@ -386,8 +426,7 @@ BackgroundImageGeometry::BackgroundImageGeometry(const LayoutNGTableCell& cell,
+                                                  PhysicalOffset cell_offset,
+                                                  const LayoutBox& table_part,
+                                                  PhysicalSize table_part_size)
+-    : BackgroundImageGeometry(&cell, &table_part) {
+-  painting_table_cell_ = true;
++    : box_(&cell), positioning_box_(&table_part), painting_table_cell_(true) {
+   cell_using_container_background_ = true;
+   element_positioning_area_offset_ = cell_offset;
+   positioning_size_override_ = table_part_size;
+@@ -395,10 +434,12 @@ BackgroundImageGeometry::BackgroundImageGeometry(const LayoutNGTableCell& cell,
+ 
+ BackgroundImageGeometry::BackgroundImageGeometry(
+     const NGPhysicalBoxFragment& fragment)
+-    : BackgroundImageGeometry(
+-          To<LayoutBoxModelObject>(fragment.GetLayoutObject()),
+-          To<LayoutBoxModelObject>(fragment.GetLayoutObject())) {
++    : box_(To<LayoutBoxModelObject>(fragment.GetLayoutObject())),
++      positioning_box_(box_) {
++  DCHECK(box_);
+   DCHECK(box_->IsBox());
++  // Specialized constructor should be used for LayoutView.
++  DCHECK(!IsA<LayoutView>(box_));
+ 
+   if (!fragment.IsOnlyForNode()) {
+     // The element is block-fragmented. We need to calculate the correct
+@@ -410,35 +451,6 @@ BackgroundImageGeometry::BackgroundImageGeometry(
+   }
+ }
+ 
+-BackgroundImageGeometry::BackgroundImageGeometry(
+-    const LayoutBoxModelObject* box,
+-    const LayoutBoxModelObject* positioning_box)
+-    : box_(box), positioning_box_(positioning_box) {
+-  // Specialized constructor should be used for LayoutView.
+-  DCHECK(!IsA<LayoutView>(box));
+-  DCHECK(box);
+-  DCHECK(positioning_box);
+-  if (positioning_box->StyleRef().HasFixedAttachmentBackgroundImage()) {
+-    has_background_fixed_to_viewport_ = true;
+-    // https://www.w3.org/TR/css-transforms-1/#transform-rendering
+-    // Fixed backgrounds on the root element are affected by any transform
+-    // specified for that element. For all other elements that are effected
+-    // by a transform, a value of fixed for the background-attachment property
+-    // is treated as if it had a value of scroll.
+-    for (const LayoutObject* container = box;
+-         container && !IsA<LayoutView>(container);
+-         container = container->Container()) {
+-      // Not using HasTransformRelatedProperty(), to excludes will-change:
+-      // transform, etc. Otherwise at least
+-      // compositing/backgrounds/fixed-backgrounds.html will fail.
+-      if (container->HasTransform()) {
+-        has_background_fixed_to_viewport_ = false;
+-        break;
+-      }
+-    }
+-  }
+-}
+-
+ void BackgroundImageGeometry::ComputeDestRectAdjustments(
+     const FillLayer& fill_layer,
+     const PhysicalRect& unsnapped_positioning_area,
+@@ -592,7 +604,8 @@ void BackgroundImageGeometry::ComputePositioningAreaAdjustments(
+ }
+ 
+ void BackgroundImageGeometry::ComputePositioningArea(
+-    const PaintInfo& paint_info,
++    const LayoutBoxModelObject* container,
++    PaintPhase paint_phase,
+     const FillLayer& fill_layer,
+     const PhysicalRect& paint_rect,
+     PhysicalRect& unsnapped_positioning_area,
+@@ -601,8 +614,9 @@ void BackgroundImageGeometry::ComputePositioningArea(
+     PhysicalOffset& snapped_box_offset) {
+   if (ShouldUseFixedAttachment(fill_layer)) {
+     // No snapping for fixed attachment.
++    SetHasNonLocalGeometry();
+     unsnapped_positioning_area =
+-        FixedAttachmentPositioningArea(paint_info, *box_);
++        FixedAttachmentPositioningArea(*box_, container);
+     unsnapped_dest_rect_ = snapped_dest_rect_ = snapped_positioning_area =
+         unsnapped_positioning_area;
+   } else {
+@@ -637,7 +651,7 @@ void BackgroundImageGeometry::ComputePositioningArea(
+     // * We are painting a block-fragmented box.
+     // * There is a border image, because it may not be opaque or may be outset.
+     bool disallow_border_derived_adjustment =
+-        !ShouldPaintSelfBlockBackground(paint_info.phase) ||
++        !ShouldPaintSelfBlockBackground(paint_phase) ||
+         fill_layer.Composite() != CompositeOperator::kCompositeSourceOver ||
+         painting_view_ || painting_table_cell_ || box_has_multiple_fragments_ ||
+         positioning_box_->StyleRef().BorderImage().GetImage() ||
+@@ -800,12 +814,10 @@ void BackgroundImageGeometry::CalculateFillTileSize(
+   return;
+ }
+ 
+-void BackgroundImageGeometry::Calculate(const PaintInfo& paint_info,
++void BackgroundImageGeometry::Calculate(const LayoutBoxModelObject* container,
++                                        PaintPhase paint_phase,
+                                         const FillLayer& fill_layer,
+                                         const PhysicalRect& paint_rect) {
+-  DCHECK_GE(box_->GetDocument().Lifecycle().GetState(),
+-            DocumentLifecycle::kPrePaintClean);
+-
+   // Unsnapped positioning area is used to derive quantities
+   // that reference source image maps and define non-integer values, such
+   // as phase and position.
+@@ -821,7 +833,7 @@ void BackgroundImageGeometry::Calculate(const PaintInfo& paint_info,
+   PhysicalOffset snapped_box_offset;
+ 
+   // This method also sets the destination rects.
+-  ComputePositioningArea(paint_info, fill_layer, paint_rect,
++  ComputePositioningArea(container, paint_phase, fill_layer, paint_rect,
+                          unsnapped_positioning_area, snapped_positioning_area,
+                          unsnapped_box_offset, snapped_box_offset);
+ 
+diff --git third_party/blink/renderer/core/paint/background_image_geometry.h third_party/blink/renderer/core/paint/background_image_geometry.h
+index 5bdd517d1aa1f..f1b44c82a4d22 100644
+--- third_party/blink/renderer/core/paint/background_image_geometry.h
++++ third_party/blink/renderer/core/paint/background_image_geometry.h
+@@ -23,7 +23,6 @@ class LayoutObject;
+ class LayoutTableCell;
+ class LayoutView;
+ class NGPhysicalBoxFragment;
+-struct PaintInfo;
+ 
+ class BackgroundImageGeometry {
+   STACK_ALLOCATED();
+@@ -40,7 +39,7 @@ class BackgroundImageGeometry {
+                           const LayoutObject* background_object);
+ 
+   // Generic constructor for all other elements.
+-  explicit BackgroundImageGeometry(const LayoutBoxModelObject&);
++  BackgroundImageGeometry(const LayoutBoxModelObject&);
+ 
+   // Constructor for TablesNG table parts.
+   BackgroundImageGeometry(const LayoutNGTableCell& cell,
+@@ -50,10 +49,8 @@ class BackgroundImageGeometry {
+ 
+   explicit BackgroundImageGeometry(const NGPhysicalBoxFragment&);
+ 
+-  // Calculates data members. This must be called before any of the following
+-  // getters is called. The document lifecycle phase must be at least
+-  // PrePaintClean.
+-  void Calculate(const PaintInfo& paint_info,
++  void Calculate(const LayoutBoxModelObject* container,
++                 PaintPhase,
+                  const FillLayer&,
+                  const PhysicalRect& paint_rect);
+ 
+@@ -89,6 +86,10 @@ class BackgroundImageGeometry {
+   // the image if used as a pattern with background-repeat: space.
+   const PhysicalSize& SpaceSize() const { return repeat_spacing_; }
+ 
++  // Has background-attachment: fixed. Implies that we can't always cheaply
++  // compute the destination rects.
++  bool HasNonLocalGeometry() const { return has_non_local_geometry_; }
++
+   // Whether the background needs to be positioned relative to a container
+   // element. Only used for tables.
+   bool CellUsingContainerBackground() const {
+@@ -101,10 +102,7 @@ class BackgroundImageGeometry {
+   InterpolationQuality ImageInterpolationQuality() const;
+ 
+  private:
+-  BackgroundImageGeometry(const LayoutBoxModelObject* box,
+-                          const LayoutBoxModelObject* positioning_box);
+-
+-  bool ShouldUseFixedAttachment(const FillLayer&) const;
++  static bool ShouldUseFixedAttachment(const FillLayer&);
+ 
+   void SetSpaceSize(const PhysicalSize& repeat_spacing) {
+     repeat_spacing_ = repeat_spacing;
+@@ -128,6 +126,7 @@ class BackgroundImageGeometry {
+   void SetSpaceY(LayoutUnit space, LayoutUnit extra_offset);
+ 
+   void UseFixedAttachment(const PhysicalOffset& attachment_point);
++  void SetHasNonLocalGeometry() { has_non_local_geometry_ = true; }
+   PhysicalOffset GetPositioningOffsetForCell(const LayoutTableCell&,
+                                              const LayoutBox&);
+   PhysicalSize GetBackgroundObjectDimensions(const LayoutTableCell&,
+@@ -152,7 +151,8 @@ class BackgroundImageGeometry {
+                                          LayoutRectOutsets&,
+                                          LayoutRectOutsets&) const;
+ 
+-  void ComputePositioningArea(const PaintInfo&,
++  void ComputePositioningArea(const LayoutBoxModelObject*,
++                              PaintPhase,
+                               const FillLayer&,
+                               const PhysicalRect&,
+                               PhysicalRect&,
+@@ -191,7 +191,7 @@ class BackgroundImageGeometry {
+   PhysicalOffset phase_;
+   PhysicalSize tile_size_;
+   PhysicalSize repeat_spacing_;
+-  bool has_background_fixed_to_viewport_ = false;
++  bool has_non_local_geometry_ = false;
+   bool painting_view_ = false;
+   bool painting_table_cell_ = false;
+   bool cell_using_container_background_ = false;
+diff --git third_party/blink/renderer/core/paint/box_painter_base.cc third_party/blink/renderer/core/paint/box_painter_base.cc
+index e13eb0b4ecc22..da3e56c7b2f98 100644
+--- third_party/blink/renderer/core/paint/box_painter_base.cc
++++ third_party/blink/renderer/core/paint/box_painter_base.cc
+@@ -955,7 +955,8 @@ void BoxPainterBase::PaintFillLayer(const PaintInfo& paint_info,
+   SkBlendMode composite_op = SkBlendMode::kSrcOver;
+   absl::optional<ScopedInterpolationQuality> interpolation_quality_context;
+   if (fill_layer_info.should_paint_image) {
+-    geometry.Calculate(paint_info, bg_layer, scrolled_paint_rect);
++    geometry.Calculate(paint_info.PaintContainer(), paint_info.phase, bg_layer,
++                       scrolled_paint_rect);
+     image = fill_layer_info.image->GetImage(
+         geometry.ImageClient(), geometry.ImageDocument(),
+         geometry.ImageStyle(style_), gfx::SizeF(geometry.TileSize()));
+diff --git third_party/blink/renderer/core/paint/paint_info.h third_party/blink/renderer/core/paint/paint_info.h
+index 290f1ec5ed9c1..45c81c2b0c45f 100644
+--- third_party/blink/renderer/core/paint/paint_info.h
++++ third_party/blink/renderer/core/paint/paint_info.h
+@@ -48,10 +48,12 @@ struct CORE_EXPORT PaintInfo {
+   PaintInfo(GraphicsContext& context,
+             const CullRect& cull_rect,
+             PaintPhase phase,
+-            PaintFlags paint_flags = PaintFlag::kNoFlag)
++            PaintFlags paint_flags = PaintFlag::kNoFlag,
++            const LayoutBoxModelObject* paint_container = nullptr)
+       : context(context),
+         phase(phase),
+         cull_rect_(cull_rect),
++        paint_container_(paint_container),
+         paint_flags_(paint_flags) {}
+ 
+   PaintInfo(GraphicsContext& new_context,
+@@ -59,6 +61,7 @@ struct CORE_EXPORT PaintInfo {
+       : context(new_context),
+         phase(copy_other_fields_from.phase),
+         cull_rect_(copy_other_fields_from.cull_rect_),
++        paint_container_(copy_other_fields_from.paint_container_),
+         fragment_id_(copy_other_fields_from.fragment_id_),
+         paint_flags_(copy_other_fields_from.paint_flags_) {
+     // We should never pass these flags to other PaintInfo.
+@@ -103,6 +106,10 @@ struct CORE_EXPORT PaintInfo {
+     return DisplayItem::PaintPhaseToClipType(phase);
+   }
+ 
++  const LayoutBoxModelObject* PaintContainer() const {
++    return paint_container_;
++  }
++
+   PaintFlags GetPaintFlags() const { return paint_flags_; }
+ 
+   const CullRect& GetCullRect() const { return cull_rect_; }
+@@ -188,6 +195,9 @@ struct CORE_EXPORT PaintInfo {
+  private:
+   CullRect cull_rect_;
+ 
++  // The box model object that originates the current painting.
++  const LayoutBoxModelObject* paint_container_;
++
+   // The ID of the fragment that we're currently painting.
+   //
+   // This is always used in legacy block fragmentation. In NG block
+diff --git third_party/blink/renderer/core/paint/paint_layer_painter.cc third_party/blink/renderer/core/paint/paint_layer_painter.cc
+index bf44e1a32d18e..47996cc127ebb 100644
+--- third_party/blink/renderer/core/paint/paint_layer_painter.cc
++++ third_party/blink/renderer/core/paint/paint_layer_painter.cc
+@@ -448,7 +448,8 @@ void PaintLayerPainter::PaintFragmentWithPhase(
+       context.GetPaintController(), chunk_properties, paint_layer_,
+       DisplayItem::PaintPhaseToDrawingType(phase));
+ 
+-  PaintInfo paint_info(context, cull_rect, phase, paint_flags);
++  PaintInfo paint_info(context, cull_rect, phase, paint_flags,
++      &paint_layer_.GetLayoutObject());
+   if (paint_layer_.GetLayoutObject().ChildPaintBlockedByDisplayLock())
+     paint_info.SetDescendantPaintingBlocked(true);
+ 
+diff --git third_party/blink/renderer/core/paint/svg_object_painter.cc third_party/blink/renderer/core/paint/svg_object_painter.cc
+index 7a943c600f663..8c8a9bc294269 100644
+--- third_party/blink/renderer/core/paint/svg_object_painter.cc
++++ third_party/blink/renderer/core/paint/svg_object_painter.cc
+@@ -37,7 +37,8 @@ void SVGObjectPainter::PaintResourceSubtree(GraphicsContext& context) {
+ 
+   PaintInfo info(
+       context, CullRect::Infinite(), PaintPhase::kForeground,
+-      PaintFlag::kOmitCompositingInfo | PaintFlag::kPaintingResourceSubtree);
++      PaintFlag::kOmitCompositingInfo | PaintFlag::kPaintingResourceSubtree,
++      &layout_object_.PaintingLayer()->GetLayoutObject());
+   layout_object_.Paint(info);
+ }
+ 
+diff --git third_party/blink/renderer/core/paint/view_painter_test.cc third_party/blink/renderer/core/paint/view_painter_test.cc
+index d5c26700ff773..a0da795a7d4db 100644
+--- third_party/blink/renderer/core/paint/view_painter_test.cc
++++ third_party/blink/renderer/core/paint/view_painter_test.cc
+@@ -9,7 +9,6 @@
+ #include "third_party/blink/renderer/core/paint/paint_controller_paint_test.h"
+ #include "third_party/blink/renderer/platform/graphics/paint/drawing_display_item.h"
+ #include "third_party/blink/renderer/platform/testing/paint_property_test_helpers.h"
+-#include "ui/gfx/geometry/skia_conversions.h"
+ 
+ using testing::ElementsAre;
+ 
+@@ -66,21 +65,20 @@ void ViewPainterFixedBackgroundTest::RunFixedBackgroundTest(
+ 
+   // This is the dest_rect_ calculated by BackgroundImageGeometry. For a fixed
+   // background in scrolling contents layer, its location is the scroll offset.
+-  auto rect = gfx::SkRectToRectF(static_cast<const cc::DrawRectOp*>(*it)->rect);
++  SkRect rect = static_cast<const cc::DrawRectOp*>(*it)->rect;
+   if (prefer_compositing_to_lcd_text) {
+-    EXPECT_EQ(gfx::RectF(0, 0, 800, 600), rect);
++    EXPECT_EQ(SkRect::MakeXYWH(0, 0, 800, 600), rect);
+   } else {
+-    EXPECT_EQ(gfx::RectF(scroll_offset.x(), scroll_offset.y(), 800, 600), rect);
++    EXPECT_EQ(SkRect::MakeXYWH(scroll_offset.x(), scroll_offset.y(), 800, 600),
++              rect);
+   }
+ }
+ 
+-TEST_P(ViewPainterFixedBackgroundTest,
+-       DocumentFixedBackgroundNotPreferCompositing) {
++TEST_P(ViewPainterFixedBackgroundTest, DocumentFixedBackgroundLowDPI) {
+   RunFixedBackgroundTest(false);
+ }
+ 
+-TEST_P(ViewPainterFixedBackgroundTest,
+-       DocumentFixedBackgroundPreferCompositing) {
++TEST_P(ViewPainterFixedBackgroundTest, DocumentFixedBackgroundHighDPI) {
+   RunFixedBackgroundTest(true);
+ }
+ 
+diff --git third_party/blink/web_tests/TestExpectations third_party/blink/web_tests/TestExpectations
+index 96eea2ede708a..91595433d14f1 100644
+--- third_party/blink/web_tests/TestExpectations
++++ third_party/blink/web_tests/TestExpectations
+@@ -824,6 +824,8 @@ crbug.com/1175040 external/wpt/css/css-backgrounds/background-repeat-space-5.html [ Failure ]
+ crbug.com/1175040 external/wpt/css/css-backgrounds/background-repeat-space-6.html [ Failure ]
+ crbug.com/1175040 external/wpt/css/css-backgrounds/background-repeat-space-7.html [ Failure ]
+ 
++crbug.com/667006 external/wpt/css/css-backgrounds/background-attachment-fixed-inside-transform-1.html [ Failure ]
++
+ # Bug accidentally masked by using square mask geometry.
+ crbug.com/1155161 svg/masking/mask-of-root.html [ Failure ]
+ 
+@@ -5808,6 +5810,11 @@ crbug.com/1199522 http/tests/devtools/layers/layers-3d-view-hit-testing.js [ Failure ]
+ # Failing css-transforms-2 web platform tests.
+ crbug.com/847356 external/wpt/css/css-transforms/transform-box/view-box-mutation-001.html [ Failure ]
+ 
++crbug.com/1261900 external/wpt/css/css-transforms/transform-fixed-bg-002.html [ Failure ]
++crbug.com/1261900 external/wpt/css/css-transforms/transform-fixed-bg-004.html [ Failure ]
++crbug.com/1261900 external/wpt/css/css-transforms/transform-fixed-bg-005.html [ Failure ]
++crbug.com/1261900 external/wpt/css/css-transforms/transform-fixed-bg-006.html [ Failure ]
++crbug.com/1261900 external/wpt/css/css-transforms/transform-fixed-bg-007.html [ Failure ]
+ # Started failing after rolling new version of check-layout-th.js
+ css3/flexbox/perpendicular-writing-modes-inside-flex-item.html [ Failure ]
+

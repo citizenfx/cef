@@ -1,0 +1,164 @@
+diff --git third_party/blink/renderer/core/paint/box_painter_base.cc third_party/blink/renderer/core/paint/box_painter_base.cc
+index 0b80634f3e2e2..7b29e749c536e 100644
+--- third_party/blink/renderer/core/paint/box_painter_base.cc
++++ third_party/blink/renderer/core/paint/box_painter_base.cc
+@@ -764,11 +764,26 @@ inline bool PaintFastBottomLayer(const Document* document,
+ 
+   auto image_auto_dark_mode = ImageClassifierHelper::GetImageAutoDarkMode(
+       *document->GetFrame(), style, image_border.Rect(), src_rect);
++
++  Image::ImageClampingMode clamping_mode =
++      Image::ImageClampingMode::kClampImageToSourceRect;
++
++  // If the intended snapped background image is the whole tile, do not clamp
++  // the source rect. This allows mipmaps and filtering to read beyond the
++  // final adjusted source rect even if snapping and scaling means it's subset.
++  // However, this detects and preserves clamping to the source rect for sprite
++  // sheet background images.
++  if (geometry.TileSize().width == geometry.SnappedDestRect().Width() &&
++      geometry.TileSize().height == geometry.SnappedDestRect().Height()) {
++    clamping_mode = Image::ImageClampingMode::kDoNotClampImageToSourceRect;
++  }
++
+   // Since there is no way for the developer to specify decode behavior, use
+   // kSync by default.
+   context.DrawImageRRect(image, Image::kSyncDecode, image_auto_dark_mode,
+                          image_border, src_rect, composite_op,
+-                         info.respect_image_orientation, may_be_lcp_candidate);
++                         info.respect_image_orientation, may_be_lcp_candidate,
++                         clamping_mode);
+ 
+   return true;
+ }
+diff --git third_party/blink/renderer/core/paint/box_painter_test.cc third_party/blink/renderer/core/paint/box_painter_test.cc
+index ec8190d49ab4b..b7e03ce10c341 100644
+--- third_party/blink/renderer/core/paint/box_painter_test.cc
++++ third_party/blink/renderer/core/paint/box_painter_test.cc
+@@ -277,4 +277,41 @@ TEST_P(BoxPainterTest, ScrollerUnderInlineTransform3DSceneLeafCrash) {
+   // This should not crash.
+ }
+ 
++size_t CountDrawImagesWithConstraint(const cc::PaintOpBuffer* buffer,
++                                     SkCanvas::SrcRectConstraint constraint) {
++  size_t count = 0;
++  for (cc::PaintOpBuffer::Iterator it(buffer); it; ++it) {
++    if (it->GetType() == cc::PaintOpType::DrawImageRect) {
++      auto* image_op = static_cast<cc::DrawImageRectOp*>(*it);
++      if (image_op->constraint == constraint)
++        ++count;
++    } else if (it->GetType() == cc::PaintOpType::DrawRecord) {
++      auto* record_op = static_cast<cc::DrawRecordOp*>(*it);
++      count +=
++          CountDrawImagesWithConstraint(record_op->record.get(), constraint);
++    }
++  }
++  return count;
++}
++
++TEST_P(BoxPainterTest, ImageClampingMode) {
++  SetBodyInnerHTML(R"HTML(
++    <!doctype html>
++    <style>
++      div#test {
++        height: 500px;
++        width: 353.743px;
++        background-image: url("data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==");
++        background-size: contain;
++        background-repeat: no-repeat;
++      }
++    </style>
++    <div id="test"></div>
++  )HTML");
++
++  sk_sp<PaintRecord> record = GetDocument().View()->GetPaintRecord();
++  EXPECT_EQ(1U, CountDrawImagesWithConstraint(
++                    record.get(), SkCanvas::kFast_SrcRectConstraint));
++}
++
+ }  // namespace blink
+diff --git third_party/blink/renderer/platform/graphics/graphics_context.cc third_party/blink/renderer/platform/graphics/graphics_context.cc
+index 8f967d93907a8..1e1b099b39e3e 100644
+--- third_party/blink/renderer/platform/graphics/graphics_context.cc
++++ third_party/blink/renderer/platform/graphics/graphics_context.cc
+@@ -752,7 +752,8 @@ void GraphicsContext::DrawImage(
+     const gfx::RectF* src_ptr,
+     SkBlendMode op,
+     RespectImageOrientationEnum should_respect_image_orientation,
+-    bool image_may_be_lcp_candidate) {
++    bool image_may_be_lcp_candidate,
++    Image::ImageClampingMode clamping_mode) {
+   if (!image)
+     return;
+ 
+@@ -763,10 +764,10 @@ void GraphicsContext::DrawImage(
+ 
+   SkSamplingOptions sampling = ComputeSamplingOptions(image, dest, src);
+   DarkModeFilter* dark_mode_filter = GetDarkModeFilterForImage(auto_dark_mode);
+-  ImageDrawOptions draw_options(
+-      dark_mode_filter, sampling, should_respect_image_orientation,
+-      Image::kClampImageToSourceRect, decode_mode, auto_dark_mode.enabled,
+-      image_may_be_lcp_candidate);
++  ImageDrawOptions draw_options(dark_mode_filter, sampling,
++                                should_respect_image_orientation, clamping_mode,
++                                decode_mode, auto_dark_mode.enabled,
++                                image_may_be_lcp_candidate);
+ 
+   image->Draw(canvas_, image_flags, dest, src, draw_options);
+   paint_controller_.SetImagePainted();
+@@ -780,13 +781,14 @@ void GraphicsContext::DrawImageRRect(
+     const gfx::RectF& src_rect,
+     SkBlendMode op,
+     RespectImageOrientationEnum respect_orientation,
+-    bool image_may_be_lcp_candidate) {
++    bool image_may_be_lcp_candidate,
++    Image::ImageClampingMode clamping_mode) {
+   if (!image)
+     return;
+ 
+   if (!dest.IsRounded()) {
+     DrawImage(image, decode_mode, auto_dark_mode, dest.Rect(), &src_rect, op,
+-              respect_orientation, image_may_be_lcp_candidate);
++              respect_orientation, image_may_be_lcp_candidate, clamping_mode);
+     return;
+   }
+ 
+@@ -804,10 +806,9 @@ void GraphicsContext::DrawImageRRect(
+   image_flags.setColor(SK_ColorBLACK);
+ 
+   DarkModeFilter* dark_mode_filter = GetDarkModeFilterForImage(auto_dark_mode);
+-  ImageDrawOptions draw_options(dark_mode_filter, sampling, respect_orientation,
+-                                Image::kClampImageToSourceRect, decode_mode,
+-                                auto_dark_mode.enabled,
+-                                image_may_be_lcp_candidate);
++  ImageDrawOptions draw_options(
++      dark_mode_filter, sampling, respect_orientation, clamping_mode,
++      decode_mode, auto_dark_mode.enabled, image_may_be_lcp_candidate);
+ 
+   bool use_shader = (visible_src == src_rect) &&
+                     (respect_orientation == kDoNotRespectImageOrientation ||
+diff --git third_party/blink/renderer/platform/graphics/graphics_context.h third_party/blink/renderer/platform/graphics/graphics_context.h
+index 329f05d66f068..064cfadadc194 100644
+--- third_party/blink/renderer/platform/graphics/graphics_context.h
++++ third_party/blink/renderer/platform/graphics/graphics_context.h
+@@ -323,7 +323,9 @@ class PLATFORM_EXPORT GraphicsContext {
+                  const gfx::RectF* src_rect = nullptr,
+                  SkBlendMode = SkBlendMode::kSrcOver,
+                  RespectImageOrientationEnum = kRespectImageOrientation,
+-                 bool image_may_be_lcp_candidate = false);
++                 bool image_may_be_lcp_candidate = false,
++                 Image::ImageClampingMode clamping_mode =
++                     Image::ImageClampingMode::kClampImageToSourceRect);
+   void DrawImageRRect(Image*,
+                       Image::ImageDecodingMode,
+                       const ImageAutoDarkMode& auto_dark_mode,
+@@ -331,7 +333,9 @@ class PLATFORM_EXPORT GraphicsContext {
+                       const gfx::RectF& src_rect,
+                       SkBlendMode = SkBlendMode::kSrcOver,
+                       RespectImageOrientationEnum = kRespectImageOrientation,
+-                      bool image_may_be_lcp_candidate = false);
++                      bool image_may_be_lcp_candidate = false,
++                      Image::ImageClampingMode clamping_mode =
++                          Image::ImageClampingMode::kClampImageToSourceRect);
+   void DrawImageTiled(Image* image,
+                       const gfx::RectF& dest_rect,
+                       const ImageTilingInfo& tiling_info,
