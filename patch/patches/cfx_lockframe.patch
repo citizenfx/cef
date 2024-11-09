@@ -1,8 +1,8 @@
 diff --git cef/include/capi/cef_browser_capi.h cef/include/capi/cef_browser_capi.h
-index 041a827a9..0bf786dc0 100644
+index b5dd342e1..ca9a45e53 100644
 --- cef/include/capi/cef_browser_capi.h
 +++ cef/include/capi/cef_browser_capi.h
-@@ -611,6 +611,8 @@ typedef struct _cef_browser_host_t {
+@@ -644,6 +644,8 @@ typedef struct _cef_browser_host_t {
    int(CEF_CALLBACK* is_window_rendering_disabled)(
        struct _cef_browser_host_t* self);
  
@@ -12,10 +12,10 @@ index 041a827a9..0bf786dc0 100644
    /// Notify the browser that the widget has been resized. The browser will
    /// first call cef_render_handler_t::GetViewRect to get the new size and then
 diff --git cef/include/cef_browser.h cef/include/cef_browser.h
-index 1574dbd62..f3a8a27ef 100644
+index 011e51271..7a7a4837c 100644
 --- cef/include/cef_browser.h
 +++ cef/include/cef_browser.h
-@@ -643,6 +643,8 @@ class CefBrowserHost : public virtual CefBaseRefCounted {
+@@ -676,6 +676,8 @@ class CefBrowserHost : public virtual CefBaseRefCounted {
    /*--cef()--*/
    virtual bool IsWindowRenderingDisabled() = 0;
  
@@ -25,7 +25,7 @@ index 1574dbd62..f3a8a27ef 100644
    /// Notify the browser that the widget has been resized. The browser will
    /// first call CefRenderHandler::GetViewRect to get the new size and then call
 diff --git cef/libcef/browser/alloy/alloy_browser_host_impl.cc cef/libcef/browser/alloy/alloy_browser_host_impl.cc
-index 135b6cebb..19da2ffe0 100644
+index d5ba002dc..d5204727c 100644
 --- cef/libcef/browser/alloy/alloy_browser_host_impl.cc
 +++ cef/libcef/browser/alloy/alloy_browser_host_impl.cc
 @@ -13,6 +13,7 @@
@@ -36,7 +36,7 @@ index 135b6cebb..19da2ffe0 100644
  #include "cef/libcef/browser/audio_capturer.h"
  #include "cef/libcef/browser/browser_context.h"
  #include "cef/libcef/browser/browser_guest_util.h"
-@@ -389,6 +390,13 @@ bool AlloyBrowserHostImpl::IsWindowRenderingDisabled() {
+@@ -390,6 +391,13 @@ bool AlloyBrowserHostImpl::IsWindowRenderingDisabled() {
    return IsWindowless();
  }
  
@@ -51,7 +51,7 @@ index 135b6cebb..19da2ffe0 100644
    if (!CEF_CURRENTLY_ON_UIT()) {
      CEF_POST_TASK(CEF_UIT,
 diff --git cef/libcef/browser/alloy/alloy_browser_host_impl.h cef/libcef/browser/alloy/alloy_browser_host_impl.h
-index 9c2a409fd..19b73603f 100644
+index 6d3acc82e..f8be2d600 100644
 --- cef/libcef/browser/alloy/alloy_browser_host_impl.h
 +++ cef/libcef/browser/alloy/alloy_browser_host_impl.h
 @@ -88,6 +88,7 @@ class AlloyBrowserHostImpl : public CefBrowserHostBase,
@@ -63,7 +63,7 @@ index 9c2a409fd..19b73603f 100644
    void WasHidden(bool hidden) override;
    void NotifyScreenInfoChanged() override;
 diff --git cef/libcef/browser/chrome/chrome_browser_host_impl.cc cef/libcef/browser/chrome/chrome_browser_host_impl.cc
-index a36a875ef..0ac63525f 100644
+index c3bd9766b..da71d3af8 100644
 --- cef/libcef/browser/chrome/chrome_browser_host_impl.cc
 +++ cef/libcef/browser/chrome/chrome_browser_host_impl.cc
 @@ -8,6 +8,7 @@
@@ -89,7 +89,7 @@ index a36a875ef..0ac63525f 100644
    if (!CEF_CURRENTLY_ON_UIT()) {
      CEF_POST_TASK(CEF_UIT, base::BindOnce(&ChromeBrowserHostImpl::OnSetFocus,
 diff --git cef/libcef/browser/chrome/chrome_browser_host_impl.h cef/libcef/browser/chrome/chrome_browser_host_impl.h
-index 9c807360f..8411aa778 100644
+index 8d039ef13..ce424ce43 100644
 --- cef/libcef/browser/chrome/chrome_browser_host_impl.h
 +++ cef/libcef/browser/chrome/chrome_browser_host_impl.h
 @@ -82,6 +82,7 @@ class ChromeBrowserHostImpl : public CefBrowserHostBase {
@@ -148,20 +148,20 @@ index 01cd0549f..0e2e0413a 100644
      const gfx::Rect& damage_rect,
      const gfx::Size& pixel_size,
 diff --git cef/libcef/browser/osr/render_widget_host_view_osr.h cef/libcef/browser/osr/render_widget_host_view_osr.h
-index e82f7c9d7..f6526e88f 100644
+index e82f7c9d7..b53c6aaa7 100644
 --- cef/libcef/browser/osr/render_widget_host_view_osr.h
 +++ cef/libcef/browser/osr/render_widget_host_view_osr.h
-@@ -259,6 +259,8 @@ class CefRenderWidgetHostViewOSR
-   void OnAcceleratedPaint(const gfx::Rect& damage_rect,
+@@ -260,6 +260,8 @@ class CefRenderWidgetHostViewOSR
                            const gfx::Size& pixel_size,
                            const CefAcceleratedPaintInfo& info);
-+
-+  void* LockFrame();
  
++  void* LockFrame();
++
    void OnBeginFame(base::TimeTicks frame_time);
  
+   bool IsPopupWidget() const {
 diff --git cef/libcef/browser/osr/video_consumer_osr.cc cef/libcef/browser/osr/video_consumer_osr.cc
-index 64c4d90a7..04adb3811 100644
+index 64c4d90a7..8183a4a22 100644
 --- cef/libcef/browser/osr/video_consumer_osr.cc
 +++ cef/libcef/browser/osr/video_consumer_osr.cc
 @@ -83,6 +83,22 @@ void CefVideoConsumerOSR::RequestRefreshFrame(
@@ -187,25 +187,19 @@ index 64c4d90a7..04adb3811 100644
  // Frame size values are as follows:
  //   info->coded_size = Width and height of the video frame. Not all pixels in
  //   this region are valid.
-@@ -105,19 +121,10 @@ void CefVideoConsumerOSR::OnFrameCaptured(
-           (info->pixel_format == media::PIXEL_FORMAT_ARGB ||
-            info->pixel_format == media::PIXEL_FORMAT_ABGR));
+@@ -113,11 +129,14 @@ void CefVideoConsumerOSR::OnFrameCaptured(
+                             : CEF_COLOR_TYPE_BGRA_8888;
  
--    // The info->pixel_format will tell if the texture is RGBA or BGRA
--    // On Linux, X11 lacks support for RGBA_8888 so it might be BGRA.
--    // On Windows and macOS, it should always be RGBA.
--    auto pixel_format = info->pixel_format == media::PIXEL_FORMAT_ABGR
--                            ? CEF_COLOR_TYPE_RGBA_8888
--                            : CEF_COLOR_TYPE_BGRA_8888;
--
  #if BUILDFLAG(IS_WIN)
 -    auto& gmb_handle = data->get_gpu_memory_buffer_handle();
--    cef_accelerated_paint_info_t paint_info;
--    paint_info.shared_texture_handle = gmb_handle.dxgi_handle.Get();
--    paint_info.format = pixel_format;
--    view_->OnAcceleratedPaint(content_rect, info->coded_size, paint_info);
 +    auto& orig_handle = data->get_gpu_memory_buffer_handle();
 +    new_handle = orig_handle.Clone();
++
+     cef_accelerated_paint_info_t paint_info;
+-    paint_info.shared_texture_handle = gmb_handle.dxgi_handle.Get();
++    paint_info.shared_texture_handle = orig_handle.dxgi_handle.Get();
+     paint_info.format = pixel_format;
+     view_->OnAcceleratedPaint(content_rect, info->coded_size, paint_info);
 +
  #elif BUILDFLAG(IS_APPLE)
      auto& gmb_handle = data->get_gpu_memory_buffer_handle();
@@ -224,10 +218,10 @@ index 51fe4b6cb..e29909ac5 100644
    // viz::mojom::FrameSinkVideoConsumer implementation.
    void OnFrameCaptured(
 diff --git cef/libcef_dll/cpptoc/browser_host_cpptoc.cc cef/libcef_dll/cpptoc/browser_host_cpptoc.cc
-index d46036cd4..2dd238c88 100644
+index ffa1ba749..4b40f62e2 100644
 --- cef/libcef_dll/cpptoc/browser_host_cpptoc.cc
 +++ cef/libcef_dll/cpptoc/browser_host_cpptoc.cc
-@@ -776,6 +776,18 @@ browser_host_add_word_to_dictionary(struct _cef_browser_host_t* self,
+@@ -794,6 +794,18 @@ browser_host_add_word_to_dictionary(struct _cef_browser_host_t* self,
    CefBrowserHostCppToC::Get(self)->AddWordToDictionary(CefString(word));
  }
  
@@ -246,7 +240,7 @@ index d46036cd4..2dd238c88 100644
  int CEF_CALLBACK
  browser_host_is_window_rendering_disabled(struct _cef_browser_host_t* self) {
    shutdown_checker::AssertNotShutdown();
-@@ -1542,8 +1554,8 @@ CefBrowserHostCppToC::CefBrowserHostCppToC() {
+@@ -1561,8 +1573,8 @@ CefBrowserHostCppToC::CefBrowserHostCppToC() {
    GetStruct()->get_navigation_entries = browser_host_get_navigation_entries;
    GetStruct()->replace_misspelling = browser_host_replace_misspelling;
    GetStruct()->add_word_to_dictionary = browser_host_add_word_to_dictionary;
@@ -258,10 +252,10 @@ index d46036cd4..2dd238c88 100644
    GetStruct()->was_hidden = browser_host_was_hidden;
    GetStruct()->notify_screen_info_changed =
 diff --git cef/libcef_dll/ctocpp/browser_host_ctocpp.cc cef/libcef_dll/ctocpp/browser_host_ctocpp.cc
-index 82f3af621..e07b9baea 100644
+index 33159c2a6..79ceab424 100644
 --- cef/libcef_dll/ctocpp/browser_host_ctocpp.cc
 +++ cef/libcef_dll/ctocpp/browser_host_ctocpp.cc
-@@ -688,6 +688,18 @@ void CefBrowserHostCToCpp::AddWordToDictionary(const CefString& word) {
+@@ -705,6 +705,18 @@ void CefBrowserHostCToCpp::AddWordToDictionary(const CefString& word) {
    _struct->add_word_to_dictionary(_struct, word.GetStruct());
  }
  
@@ -281,10 +275,10 @@ index 82f3af621..e07b9baea 100644
  bool CefBrowserHostCToCpp::IsWindowRenderingDisabled() {
    shutdown_checker::AssertNotShutdown();
 diff --git cef/libcef_dll/ctocpp/browser_host_ctocpp.h cef/libcef_dll/ctocpp/browser_host_ctocpp.h
-index f11330682..dd5fd0802 100644
+index 51068d572..f670aade4 100644
 --- cef/libcef_dll/ctocpp/browser_host_ctocpp.h
 +++ cef/libcef_dll/ctocpp/browser_host_ctocpp.h
-@@ -89,6 +89,7 @@ class CefBrowserHostCToCpp : public CefCToCppRefCounted<CefBrowserHostCToCpp,
+@@ -90,6 +90,7 @@ class CefBrowserHostCToCpp : public CefCToCppRefCounted<CefBrowserHostCToCpp,
    void ReplaceMisspelling(const CefString& word) override;
    void AddWordToDictionary(const CefString& word) override;
    bool IsWindowRenderingDisabled() override;
